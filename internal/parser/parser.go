@@ -14,6 +14,7 @@ package parser
 import (
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strconv"
 
@@ -114,18 +115,27 @@ func Parse(r io.Reader) (*Result, error) {
 	parser := dem.NewParser(r)
 	defer parser.Close()
 
-	header, err := parser.ParseHeader()
-	if err != nil {
+	// CS2 (Source 2) demos don't carry the legacy HL2DEMO file
+	// header CSGO demos do — fields like PlaybackTicks / MapName /
+	// FrameRate come back zero from ParseHeader on CS2. We still
+	// call it (the library expects it before ParseToEnd) but
+	// ignore the empty fields and re-derive everything from the
+	// live parser state after the parse loop completes.
+	if _, err := parser.ParseHeader(); err != nil {
 		return nil, fmt.Errorf("parse header: %w", err)
 	}
 
-	res := &Result{
-		TotalTicks: header.PlaybackTicks,
-		TickRate:   header.FrameRate(), // CS2 demos: tickrate == frame rate per second
-		MapName:    header.MapName,
-	}
-	if m := workshopMapRe.FindStringSubmatch(header.MapName); len(m) == 2 {
-		res.WorkshopID = m[1]
+	res := &Result{}
+	// Track the highest in-game tick we observe. ServerInfo /
+	// MatchStart fire early; round_starts and frame ticks fire
+	// throughout. The max is the de-facto demo length when the
+	// header doesn't carry it.
+	maxTick := 0
+	captureMaxTick := func() {
+		t := parser.GameState().IngameTick()
+		if t > maxTick {
+			maxTick = t
+		}
 	}
 
 	// matchStarted gates the round event collection: demos always include
@@ -146,6 +156,7 @@ func Parse(r io.Reader) (*Result, error) {
 	})
 
 	parser.RegisterEventHandler(func(e events.RoundStart) {
+		captureMaxTick()
 		if !matchStarted {
 			return
 		}
@@ -169,6 +180,7 @@ func Parse(r io.Reader) (*Result, error) {
 	})
 
 	parser.RegisterEventHandler(func(e events.RoundEndOfficial) {
+		captureMaxTick()
 		if !matchStarted || len(res.RoundTicks) == 0 {
 			return
 		}
@@ -243,8 +255,45 @@ func Parse(r io.Reader) (*Result, error) {
 		})
 	})
 
+	// CS2 demos occasionally hit entity-resolution errors mid-stream
+	// inside demoinfocs ("unable to find existing entity NNN" or
+	// similar). The parser bails at that tick, but we've already
+	// collected everything up to that point — round_ticks, kills,
+	// bombs all fire from event handlers so the slices are valid as
+	// of the last successful tick.
+	//
+	// Treat ParseToEnd errors as soft: log + return what we have.
+	// The api caller persists partial results; the popup gets a
+	// shorter timeline than the full match but still has nav.
 	if err := parser.ParseToEnd(); err != nil {
-		return nil, fmt.Errorf("parse to end: %w", err)
+		fmt.Fprintf(os.Stderr,
+			"parse-to-end error (returning partial result): %v\n", err)
+	}
+
+	// Resolve header-equivalent fields from the live parser state.
+	// CS2 demos don't carry these on the file header (see ParseHeader
+	// note above) — they're inferred from packets observed during
+	// ParseToEnd. This block runs even on partial parses so the
+	// scrubber gets *some* total/rate.
+	if rate := parser.TickRate(); rate > 0 {
+		res.TickRate = rate
+	}
+	// Last observed in-game tick: best signal for "demo length" when
+	// the file header is empty. For partial parses this is the
+	// abort tick — still better than zero for the UI.
+	if t := parser.GameState().IngameTick(); t > maxTick {
+		maxTick = t
+	}
+	res.TotalTicks = maxTick
+	// MapName: demoinfocs's cached header is sometimes populated
+	// after ParseToEnd from packet metadata, sometimes not. If empty
+	// we leave it empty — the popup falls back to "<unknown>" and
+	// workshop-map detection no-ops (stock-map demos work fine).
+	if h := parser.Header(); h.MapName != "" {
+		res.MapName = h.MapName
+		if m := workshopMapRe.FindStringSubmatch(h.MapName); len(m) == 2 {
+			res.WorkshopID = m[1]
+		}
 	}
 
 	return res, nil
