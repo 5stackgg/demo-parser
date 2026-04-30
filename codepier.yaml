@@ -1,0 +1,9 @@
+namespaces: [5stack]
+image: golang:1.24-alpine
+deployment: demo-parser
+workdir: /opt/5stack
+sync:
+  - .:/opt/5stack
+ignore:
+  - "/tmp"
+  - "/bin"

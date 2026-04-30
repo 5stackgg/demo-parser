@@ -1,0 +1,71 @@
+package parser
+
+import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+
+// matchStarted gates round event collection: demos always include
+// warmup + (optional) knife rounds before the actual match. Counting
+// those as "rounds 1..N" would mismatch the user's scoreboard.
+
+func (s *state) onMatchStart(_ events.MatchStart) {
+	s.matchStarted = true
+	// CSGO fires MatchStart once. CS2 sometimes fires it again
+	// post-knife — resetting currentRound here keeps post-knife
+	// round 1 aligned with scoreboard round 1.
+	s.currentRound = 0
+	s.res.RoundTicks = s.res.RoundTicks[:0]
+}
+
+func (s *state) onRoundStart(_ events.RoundStart) {
+	s.captureMaxTick()
+	// Sweep all currently-connected participants to catch player
+	// names that hadn't synced on m_szPlayerName when their first
+	// kill event fired.
+	for _, p := range s.parser.GameState().Participants().All() {
+		s.recordPlayerName(p)
+	}
+	if !s.matchStarted {
+		return
+	}
+	s.currentRound++
+	s.currentRoundStartTick = s.parser.GameState().IngameTick()
+	s.currentFreezeEndTick = 0
+	// Entities are reused across rounds but visibility resets at
+	// freeze break, so a fresh sighting always starts each round.
+	s.visStart = map[string]map[string]visEntry{}
+	// Sprays don't carry across rounds.
+	s.lastShot = map[string]shotMark{}
+	s.res.RoundTicks = append(s.res.RoundTicks, RoundTick{
+		Round:     s.currentRound,
+		StartTick: s.currentRoundStartTick,
+	})
+}
+
+// onRoundFreezetimeEnd marks the moment players can move/shoot. Used
+// as the TTD anchor — damage during freeze (knife-out, suicide) is
+// ignored downstream.
+func (s *state) onRoundFreezetimeEnd(_ events.RoundFreezetimeEnd) {
+	if !s.matchStarted {
+		return
+	}
+	s.currentFreezeEndTick = s.parser.GameState().IngameTick()
+}
+
+func (s *state) onRoundEnd(e events.RoundEnd) {
+	if !s.matchStarted || len(s.res.RoundTicks) == 0 {
+		return
+	}
+	last := &s.res.RoundTicks[len(s.res.RoundTicks)-1]
+	last.Winner = teamCode(e.Winner)
+	last.Reason = int(e.Reason)
+}
+
+func (s *state) onRoundEndOfficial(_ events.RoundEndOfficial) {
+	s.captureMaxTick()
+	if !s.matchStarted || len(s.res.RoundTicks) == 0 {
+		return
+	}
+	// RoundEndOfficial fires after the freeze-time delay following
+	// RoundEnd; this is the tick the demo timeline considers the
+	// round closed.
+	s.res.RoundTicks[len(s.res.RoundTicks)-1].EndTick = s.parser.GameState().IngameTick()
+}
