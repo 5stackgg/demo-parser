@@ -77,15 +77,21 @@ type RoundTick struct {
 // the GraphQL subscription tick. Steam IDs as strings (bigint
 // overflow safety in JS).
 type EventKill struct {
-	Tick           int    `json:"tick"`
-	KillerSteamID  string `json:"killer,omitempty"`
-	VictimSteamID  string `json:"victim,omitempty"`
-	AssistSteamID  string `json:"assist,omitempty"`
-	Weapon         string `json:"weapon,omitempty"`
-	Headshot       bool   `json:"headshot,omitempty"`
-	WallBang       bool   `json:"wallbang,omitempty"`
-	NoScope        bool   `json:"noscope,omitempty"`
-	ThroughSmoke   bool   `json:"smoke,omitempty"`
+	Tick          int    `json:"tick"`
+	KillerSteamID string `json:"killer,omitempty"`
+	VictimSteamID string `json:"victim,omitempty"`
+	AssistSteamID string `json:"assist,omitempty"`
+	// "ct" / "t" / "" — team membership at the moment of the kill.
+	// CS2 demos swap teams at halftime, so capturing this per-kill is
+	// the only way the web side can color-code markers without
+	// replaying side-swap math.
+	KillerTeam   string `json:"killer_team,omitempty"`
+	VictimTeam   string `json:"victim_team,omitempty"`
+	Weapon       string `json:"weapon,omitempty"`
+	Headshot     bool   `json:"headshot,omitempty"`
+	WallBang     bool   `json:"wallbang,omitempty"`
+	NoScope      bool   `json:"noscope,omitempty"`
+	ThroughSmoke bool   `json:"smoke,omitempty"`
 }
 
 type EventBomb struct {
@@ -215,6 +221,12 @@ func Parse(r io.Reader) (*Result, error) {
 			WallBang:      e.IsWallBang(),
 			NoScope:       e.NoScope,
 			ThroughSmoke:  e.ThroughSmoke,
+		}
+		if e.Killer != nil {
+			k.KillerTeam = teamCode(e.Killer.Team)
+		}
+		if e.Victim != nil {
+			k.VictimTeam = teamCode(e.Victim.Team)
 		}
 		if e.Weapon != nil {
 			k.Weapon = e.Weapon.String()
