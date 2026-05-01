@@ -18,9 +18,10 @@ import (
 	"regexp"
 	"strconv"
 
-	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
-	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
-	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
+	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/msg"
 )
 
 func teamCode(t common.Team) string {
@@ -115,17 +116,20 @@ func Parse(r io.Reader) (*Result, error) {
 	parser := dem.NewParser(r)
 	defer parser.Close()
 
-	// CS2 (Source 2) demos don't carry the legacy HL2DEMO file
-	// header CSGO demos do — fields like PlaybackTicks / MapName /
-	// FrameRate come back zero from ParseHeader on CS2. We still
-	// call it (the library expects it before ParseToEnd) but
-	// ignore the empty fields and re-derive everything from the
-	// live parser state after the parse loop completes.
-	if _, err := parser.ParseHeader(); err != nil {
-		return nil, fmt.Errorf("parse header: %w", err)
-	}
+	// v5 dropped Parser.ParseHeader / common.DemoHeader and only supports
+	// CS2 (Source 2) demos. Map name now comes from the CSVCMsg_ServerInfo
+	// net message that fires once near the start of every demo; we capture
+	// it live instead of reading a header struct after ParseToEnd.
 
 	res := &Result{}
+	parser.RegisterNetMessageHandler(func(m *msg.CSVCMsg_ServerInfo) {
+		if name := m.GetMapName(); name != "" {
+			res.MapName = name
+			if mm := workshopMapRe.FindStringSubmatch(name); len(mm) == 2 {
+				res.WorkshopID = mm[1]
+			}
+		}
+	})
 	// Track the highest in-game tick we observe. ServerInfo /
 	// MatchStart fire early; round_starts and frame ticks fire
 	// throughout. The max is the de-facto demo length when the
@@ -285,16 +289,10 @@ func Parse(r io.Reader) (*Result, error) {
 		maxTick = t
 	}
 	res.TotalTicks = maxTick
-	// MapName: demoinfocs's cached header is sometimes populated
-	// after ParseToEnd from packet metadata, sometimes not. If empty
-	// we leave it empty — the popup falls back to "<unknown>" and
+	// MapName / WorkshopID are set by the CSVCMsg_ServerInfo handler
+	// above. If the handler never fired (very early parse abort) the
+	// fields stay empty — the popup falls back to "<unknown>" and
 	// workshop-map detection no-ops (stock-map demos work fine).
-	if h := parser.Header(); h.MapName != "" {
-		res.MapName = h.MapName
-		if m := workshopMapRe.FindStringSubmatch(h.MapName); len(m) == 2 {
-			res.WorkshopID = m[1]
-		}
-	}
 
 	return res, nil
 }
