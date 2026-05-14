@@ -64,10 +64,13 @@ func runCLI() {
 		os.Exit(1)
 	}
 	log.Printf(
-		"parsed in %s: ticks=%d tick_rate=%.1f rounds=%d kills=%d bombs=%d map=%s",
+		"parsed in %s: ticks=%d tick_rate=%.1f rounds=%d kills=%d bombs=%d "+
+			"shots=%d damages=%d spotted=%d nades_thrown=%d nades_detonated=%d map=%s",
 		time.Since(start),
 		result.TotalTicks, result.TickRate,
 		len(result.RoundTicks), len(result.Kills), len(result.Bombs),
+		len(result.ShotsFired), len(result.Damages), len(result.Spotted),
+		len(result.GrenadeThrows), len(result.GrenadeDetonations),
 		result.MapName,
 	)
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
