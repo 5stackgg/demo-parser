@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 
 	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
@@ -77,15 +78,21 @@ type RoundTick struct {
 // the GraphQL subscription tick. Steam IDs as strings (bigint
 // overflow safety in JS).
 type EventKill struct {
-	Tick           int    `json:"tick"`
-	KillerSteamID  string `json:"killer,omitempty"`
-	VictimSteamID  string `json:"victim,omitempty"`
-	AssistSteamID  string `json:"assist,omitempty"`
-	Weapon         string `json:"weapon,omitempty"`
-	Headshot       bool   `json:"headshot,omitempty"`
-	WallBang       bool   `json:"wallbang,omitempty"`
-	NoScope        bool   `json:"noscope,omitempty"`
-	ThroughSmoke   bool   `json:"smoke,omitempty"`
+	Tick          int    `json:"tick"`
+	KillerSteamID string `json:"killer,omitempty"`
+	VictimSteamID string `json:"victim,omitempty"`
+	AssistSteamID string `json:"assist,omitempty"`
+	// "ct" / "t" / "" — team membership at the moment of the kill.
+	// CS2 demos swap teams at halftime, so capturing this per-kill is
+	// the only way the web side can color-code markers without
+	// replaying side-swap math.
+	KillerTeam   string `json:"killer_team,omitempty"`
+	VictimTeam   string `json:"victim_team,omitempty"`
+	Weapon       string `json:"weapon,omitempty"`
+	Headshot     bool   `json:"headshot,omitempty"`
+	WallBang     bool   `json:"wallbang,omitempty"`
+	NoScope      bool   `json:"noscope,omitempty"`
+	ThroughSmoke bool   `json:"smoke,omitempty"`
 }
 
 type EventBomb struct {
@@ -95,6 +102,70 @@ type EventBomb struct {
 	Site   string `json:"site,omitempty"` // "A" | "B"
 }
 
+type EventShotFired struct {
+	Tick            int    `json:"tick"`
+	Round           int    `json:"round,omitempty"`
+	AttackerSteamID string `json:"attacker,omitempty"`
+	AttackerTeam    string `json:"attacker_team,omitempty"`
+	Weapon          string `json:"weapon,omitempty"`
+}
+
+type EventDamage struct {
+	Tick            int     `json:"tick"`
+	Round           int     `json:"round,omitempty"`
+	AttackerSteamID string  `json:"attacker,omitempty"`
+	VictimSteamID   string  `json:"victim,omitempty"`
+	AttackerTeam    string  `json:"attacker_team,omitempty"`
+	VictimTeam      string  `json:"victim_team,omitempty"`
+	Weapon          string  `json:"weapon,omitempty"`
+	Damage          int     `json:"damage"`
+	DamageArmor     int     `json:"damage_armor,omitempty"`
+	Hitgroup        int     `json:"hitgroup,omitempty"`
+	Health          int     `json:"health,omitempty"`
+	SinceRoundStart float64 `json:"since_round_start,omitempty"`
+}
+
+type EventSpotted struct {
+	Tick           int    `json:"tick"`
+	Round          int    `json:"round,omitempty"`
+	SpotterSteamID string `json:"spotter,omitempty"`
+	SpottedSteamID string `json:"spotted,omitempty"`
+	SpotterTeam    string `json:"spotter_team,omitempty"`
+}
+
+type EventGrenadeThrow struct {
+	Tick           int     `json:"tick"`
+	Round          int     `json:"round,omitempty"`
+	ThrowerSteamID string  `json:"thrower,omitempty"`
+	ThrowerTeam    string  `json:"thrower_team,omitempty"`
+	Type           string  `json:"type"` // "Flash" | "HE" | "Smoke" | "Molotov" | "Decoy"
+	OriginX        float32 `json:"ox,omitempty"`
+	OriginY        float32 `json:"oy,omitempty"`
+	OriginZ        float32 `json:"oz,omitempty"`
+}
+
+type EventGrenadeDetonate struct {
+	Tick           int     `json:"tick"`
+	Round          int     `json:"round,omitempty"`
+	ThrowerSteamID string  `json:"thrower,omitempty"`
+	Type           string  `json:"type"`
+	X              float32 `json:"x,omitempty"`
+	Y              float32 `json:"y,omitempty"`
+	Z              float32 `json:"z,omitempty"`
+}
+
+// PlayerInfo — steam_id → in-game name observed in the demo. Populated
+// from kill/death events (every match touches every player). The api
+// reads this at clip-render enqueue time so the auto-generated titles
+// in the render queue UI ("CabessaaR — Best Round (4K)" instead of
+// "Player 6843 — Best Round (4K)") have real names BEFORE cs2 spins
+// up — the existing GSI-based name patch only fires once a render is
+// already in progress, which left the queued rows reading "Player NNNN".
+type PlayerInfo struct {
+	SteamID string `json:"steam_id"`
+	Name    string `json:"name"`
+}
+
 type Result struct {
 	TotalTicks int         `json:"total_ticks"`
 	TickRate   float64     `json:"tick_rate"`
@@ -102,10 +173,36 @@ type Result struct {
 	// Set when MapName is a workshop map (`workshop/<id>/<name>`).
 	// Empty for stock maps. The streamer pod uses this to pre-download
 	// the .vpk via steamcmd before launching CS2.
-	WorkshopID string      `json:"workshop_id,omitempty"`
-	RoundTicks []RoundTick `json:"round_ticks"`
-	Kills      []EventKill `json:"kills"`
-	Bombs      []EventBomb `json:"bombs"`
+	WorkshopID string       `json:"workshop_id,omitempty"`
+	RoundTicks []RoundTick  `json:"round_ticks"`
+	Kills      []EventKill  `json:"kills"`
+	Bombs      []EventBomb  `json:"bombs"`
+	Players    []PlayerInfo `json:"players,omitempty"`
+
+	ShotsFired         []EventShotFired       `json:"shots_fired,omitempty"`
+	Damages            []EventDamage          `json:"damages,omitempty"`
+	Spotted            []EventSpotted         `json:"spotted,omitempty"`
+	GrenadeThrows      []EventGrenadeThrow    `json:"grenade_throws,omitempty"`
+	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
+}
+
+// grenadeTypeCode maps an EquipmentType to the wire string used in
+// EventGrenadeThrow / EventGrenadeDetonate. Returns "" for non-grenades.
+func grenadeTypeCode(t common.EquipmentType) string {
+	switch t {
+	case common.EqFlash:
+		return "Flash"
+	case common.EqHE:
+		return "HE"
+	case common.EqSmoke:
+		return "Smoke"
+	case common.EqMolotov, common.EqIncendiary:
+		return "Molotov"
+	case common.EqDecoy:
+		return "Decoy"
+	default:
+		return ""
+	}
 }
 
 // Parse reads a CS2/CSGO demo from r and returns the playback metadata.
@@ -148,6 +245,73 @@ func Parse(r io.Reader) (*Result, error) {
 	// scoreboard — they want to scrub to scoreboard round 1, not "warmup".
 	matchStarted := false
 	currentRound := 0
+	// Tick the most recent RoundStart fired at — used to compute
+	// since_round_start for damage events (and would be reused by any
+	// future round-relative metric). Captured via closure by all
+	// handlers below.
+	currentRoundStartTick := 0
+	// Per-player set of "who currently has me spotted", keyed by
+	// spotted player's steam_id then by spotter steam_id. We only emit
+	// an EventSpotted on the rising edge (new spotter appears) — losing
+	// sight is implicit and would just spam the timeline.
+	seenSpotters := map[string]map[string]struct{}{}
+
+	// Accumulate player names as we observe them via kill events. Map
+	// here for de-dup; we flatten to the slice form on the Result at
+	// the very end. Skipping bots (no real steam_id) and the empty
+	// string (steamIDStr returns "" for nil players).
+	playerNames := map[string]string{}
+	recordPlayerName := func(p *common.Player) {
+		if p == nil || p.IsBot {
+			return
+		}
+		sid := steamIDStr(p)
+		if sid == "" {
+			return
+		}
+		name := p.Name
+		// "unknown" is the placeholder demoinfocs assigns to GOTV
+		// players whose raw player-info row is missing — never a real
+		// player name. Skip so a transient lookup failure doesn't
+		// permanently shadow a later valid name from the userinfo
+		// string-table.
+		if name == "" || name == "unknown" {
+			return
+		}
+		// Last write wins — players can rename mid-match. The most
+		// recent is what the streamer pod's GSI would also report.
+		playerNames[sid] = name
+	}
+
+	// The demo's userinfo string-table is the AUTHORITATIVE source for
+	// (steam_id, name) pairs — it's the same data CS2 itself ships to
+	// connected clients (and what GSI reports on the streamer pod).
+	// Every player who ever connected gets a row, even if they
+	// disconnected before any kill event or their player-controller
+	// entity got recycled. We hook the events.PlayerInfo dispatch
+	// directly so disconnected players still land in res.Players —
+	// without this, demos where a coach swapped seats mid-match (or
+	// where userinfo arrived ahead of the player-controller binding)
+	// produced "Player NNNN" titles on the queue panel until the
+	// streamer pod's GSI patch fired.
+	recordPlayerInfo := func(info common.PlayerInfo) {
+		if info.IsFakePlayer || info.GUID == "BOT" {
+			return
+		}
+		if info.XUID == 0 || info.Name == "" {
+			return
+		}
+		playerNames[strconv.FormatUint(info.XUID, 10)] = info.Name
+	}
+	parser.RegisterEventHandler(func(e events.PlayerInfo) {
+		recordPlayerInfo(e.Info)
+	})
+	parser.RegisterEventHandler(func(e events.PlayerConnect) {
+		recordPlayerName(e.Player)
+	})
+	parser.RegisterEventHandler(func(e events.PlayerNameChange) {
+		recordPlayerName(e.Player)
+	})
 
 	parser.RegisterEventHandler(func(e events.MatchStart) {
 		matchStarted = true
@@ -161,13 +325,29 @@ func Parse(r io.Reader) (*Result, error) {
 
 	parser.RegisterEventHandler(func(e events.RoundStart) {
 		captureMaxTick()
+		// Sweep all currently-connected participants on every round
+		// start so we capture player names from demos where m_szPlayerName
+		// hasn't synced by the first time a player shows up in a Kill
+		// event. Without this, a player who got their kills early in
+		// the demo (when their name net-field was still empty) ends up
+		// missing from res.Players, and the api ends up titling clips
+		// "Player NNNN" until the streamer pod can patch it via GSI.
+		for _, p := range parser.GameState().Participants().All() {
+			recordPlayerName(p)
+		}
 		if !matchStarted {
 			return
 		}
 		currentRound++
+		currentRoundStartTick = parser.GameState().IngameTick()
+		// Reset the spotter cache each round — the engine reuses
+		// player entities across rounds but visibility resets at the
+		// freeze break, so the first PlayerSpottersChanged of the new
+		// round should always emit (it's a brand-new sighting).
+		seenSpotters = map[string]map[string]struct{}{}
 		res.RoundTicks = append(res.RoundTicks, RoundTick{
 			Round:     currentRound,
-			StartTick: parser.GameState().IngameTick(),
+			StartTick: currentRoundStartTick,
 		})
 	})
 
@@ -206,6 +386,9 @@ func Parse(r io.Reader) (*Result, error) {
 		if !matchStarted {
 			return
 		}
+		recordPlayerName(e.Killer)
+		recordPlayerName(e.Victim)
+		recordPlayerName(e.Assister)
 		k := EventKill{
 			Tick:          parser.GameState().IngameTick(),
 			KillerSteamID: steamIDStr(e.Killer),
@@ -215,6 +398,12 @@ func Parse(r io.Reader) (*Result, error) {
 			WallBang:      e.IsWallBang(),
 			NoScope:       e.NoScope,
 			ThroughSmoke:  e.ThroughSmoke,
+		}
+		if e.Killer != nil {
+			k.KillerTeam = teamCode(e.Killer.Team)
+		}
+		if e.Victim != nil {
+			k.VictimTeam = teamCode(e.Victim.Team)
 		}
 		if e.Weapon != nil {
 			k.Weapon = e.Weapon.String()
@@ -259,6 +448,192 @@ func Parse(r io.Reader) (*Result, error) {
 		})
 	})
 
+	// WeaponFire — one row per shot. Filter to firearm classes only:
+	// knives and grenade "fires" would balloon the array and don't
+	// participate in accuracy metrics. demoinfocs's EquipmentClass
+	// already buckets exactly the way we want (Pistols/SMG/Heavy/Rifle).
+	parser.RegisterEventHandler(func(e events.WeaponFire) {
+		if !matchStarted || e.Shooter == nil || e.Weapon == nil {
+			return
+		}
+		switch e.Weapon.Class() {
+		case common.EqClassPistols, common.EqClassSMG,
+			common.EqClassHeavy, common.EqClassRifle:
+			// firearm — keep
+		default:
+			return
+		}
+		res.ShotsFired = append(res.ShotsFired, EventShotFired{
+			Tick:            parser.GameState().IngameTick(),
+			Round:           currentRound,
+			AttackerSteamID: steamIDStr(e.Shooter),
+			AttackerTeam:    teamCode(e.Shooter.Team),
+			Weapon:          e.Weapon.String(),
+		})
+	})
+
+	// PlayerHurt — one row per damage instance. Skip self-damage
+	// (HE/molly on yourself) and null attackers (world / falling), both
+	// of which would skew aim/damage stats on the ingestion side.
+	parser.RegisterEventHandler(func(e events.PlayerHurt) {
+		if !matchStarted || e.Attacker == nil || e.Player == nil {
+			return
+		}
+		if e.Attacker == e.Player {
+			return
+		}
+		tick := parser.GameState().IngameTick()
+		sinceRound := 0.0
+		if rate := parser.TickRate(); rate > 0 {
+			sinceRound = float64(tick-currentRoundStartTick) / rate
+		}
+		d := EventDamage{
+			Tick:            tick,
+			Round:           currentRound,
+			AttackerSteamID: steamIDStr(e.Attacker),
+			VictimSteamID:   steamIDStr(e.Player),
+			AttackerTeam:    teamCode(e.Attacker.Team),
+			VictimTeam:      teamCode(e.Player.Team),
+			Damage:          e.HealthDamage,
+			DamageArmor:     e.ArmorDamage,
+			Hitgroup:        int(e.HitGroup),
+			Health:          e.Health,
+			SinceRoundStart: sinceRound,
+		}
+		if e.Weapon != nil {
+			d.Weapon = e.Weapon.String()
+		}
+		res.Damages = append(res.Damages, d)
+	})
+
+	// PlayerSpottersChanged — v5 fires this whenever the set of
+	// players that can see e.Spotted changes. The event doesn't tell
+	// us *who* changed, so we diff against a cached set and emit one
+	// EventSpotted per newly-appearing spotter. Losses-of-sight are
+	// ignored (an EventUnspotted would just double the wire size for
+	// no analytical value on the leetify-parity dashboards).
+	parser.RegisterEventHandler(func(e events.PlayerSpottersChanged) {
+		if !matchStarted || e.Spotted == nil {
+			return
+		}
+		spottedID := steamIDStr(e.Spotted)
+		if spottedID == "" {
+			return
+		}
+		prev := seenSpotters[spottedID]
+		next := map[string]struct{}{}
+		tick := parser.GameState().IngameTick()
+		for _, p := range parser.GameState().Participants().All() {
+			if p == nil || p == e.Spotted {
+				continue
+			}
+			if !p.HasSpotted(e.Spotted) {
+				continue
+			}
+			pid := steamIDStr(p)
+			if pid == "" {
+				continue
+			}
+			next[pid] = struct{}{}
+			if _, had := prev[pid]; had {
+				continue
+			}
+			res.Spotted = append(res.Spotted, EventSpotted{
+				Tick:           tick,
+				Round:          currentRound,
+				SpotterSteamID: pid,
+				SpottedSteamID: spottedID,
+				SpotterTeam:    teamCode(p.Team),
+			})
+		}
+		seenSpotters[spottedID] = next
+	})
+
+	// GrenadeProjectileThrow — fires when the projectile entity is
+	// created (i.e. the moment the grenade leaves the player's hand).
+	// Note FireGrenadeStart has a nil Thrower in Source 2 demos, so the
+	// throw-side data must come from this event.
+	parser.RegisterEventHandler(func(e events.GrenadeProjectileThrow) {
+		if !matchStarted || e.Projectile == nil {
+			return
+		}
+		thrower := e.Projectile.Thrower
+		if thrower == nil {
+			thrower = e.Projectile.Owner
+		}
+		var gtype string
+		if e.Projectile.WeaponInstance != nil {
+			gtype = grenadeTypeCode(e.Projectile.WeaponInstance.Type)
+		}
+		if gtype == "" {
+			return
+		}
+		pos := e.Projectile.Position()
+		ev := EventGrenadeThrow{
+			Tick:    parser.GameState().IngameTick(),
+			Round:   currentRound,
+			Type:    gtype,
+			OriginX: float32(pos.X),
+			OriginY: float32(pos.Y),
+			OriginZ: float32(pos.Z),
+		}
+		if thrower != nil {
+			ev.ThrowerSteamID = steamIDStr(thrower)
+			ev.ThrowerTeam = teamCode(thrower.Team)
+		}
+		res.GrenadeThrows = append(res.GrenadeThrows, ev)
+	})
+
+	// Detonation handlers — share the same wire shape and pull from
+	// the embedded GrenadeEvent. FireGrenadeStart's Thrower is always
+	// nil in Source 2; the ingestion side can join back to the most
+	// recent matching throw if it needs to attribute mollies.
+	emitDetonate := func(base events.GrenadeEvent, typeOverride string) {
+		gtype := typeOverride
+		if gtype == "" {
+			gtype = grenadeTypeCode(base.GrenadeType)
+		}
+		if gtype == "" {
+			return
+		}
+		ev := EventGrenadeDetonate{
+			Tick:  parser.GameState().IngameTick(),
+			Round: currentRound,
+			Type:  gtype,
+			X:     float32(base.Position.X),
+			Y:     float32(base.Position.Y),
+			Z:     float32(base.Position.Z),
+		}
+		if base.Thrower != nil {
+			ev.ThrowerSteamID = steamIDStr(base.Thrower)
+		}
+		res.GrenadeDetonations = append(res.GrenadeDetonations, ev)
+	}
+	parser.RegisterEventHandler(func(e events.HeExplode) {
+		if !matchStarted {
+			return
+		}
+		emitDetonate(e.GrenadeEvent, "HE")
+	})
+	parser.RegisterEventHandler(func(e events.FlashExplode) {
+		if !matchStarted {
+			return
+		}
+		emitDetonate(e.GrenadeEvent, "Flash")
+	})
+	parser.RegisterEventHandler(func(e events.SmokeStart) {
+		if !matchStarted {
+			return
+		}
+		emitDetonate(e.GrenadeEvent, "Smoke")
+	})
+	parser.RegisterEventHandler(func(e events.FireGrenadeStart) {
+		if !matchStarted {
+			return
+		}
+		emitDetonate(e.GrenadeEvent, "Molotov")
+	})
+
 	// CS2 demos occasionally hit entity-resolution errors mid-stream
 	// inside demoinfocs ("unable to find existing entity NNN" or
 	// similar). The parser bails at that tick, but we've already
@@ -293,6 +668,31 @@ func Parse(r io.Reader) (*Result, error) {
 	// above. If the handler never fired (very early parse abort) the
 	// fields stay empty — the popup falls back to "<unknown>" and
 	// workshop-map detection no-ops (stock-map demos work fine).
+
+	// Final participant sweep — picks up any player whose name net-field
+	// settled after their last kill-event sample (eg. late reconnect
+	// at end-of-match scoreboard).
+	for _, p := range parser.GameState().Participants().All() {
+		recordPlayerName(p)
+	}
+
+	// Flatten the accumulated player-name map onto the result. Sort
+	// by steam_id for stable JSON output (handy when diffing parser
+	// runs across changes).
+	if len(playerNames) > 0 {
+		res.Players = make([]PlayerInfo, 0, len(playerNames))
+		ids := make([]string, 0, len(playerNames))
+		for sid := range playerNames {
+			ids = append(ids, sid)
+		}
+		sort.Strings(ids)
+		for _, sid := range ids {
+			res.Players = append(res.Players, PlayerInfo{
+				SteamID: sid,
+				Name:    playerNames[sid],
+			})
+		}
+	}
 
 	return res, nil
 }
