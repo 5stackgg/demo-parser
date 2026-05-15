@@ -14,11 +14,13 @@ package parser
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"sort"
 	"strconv"
 
+	"github.com/golang/geo/r3"
 	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
@@ -108,6 +110,10 @@ type EventShotFired struct {
 	AttackerSteamID string `json:"attacker,omitempty"`
 	AttackerTeam    string `json:"attacker_team,omitempty"`
 	Weapon          string `json:"weapon,omitempty"`
+	// Pointers so we can distinguish "no frame snapshot" from "zero".
+	Speed             *float32 `json:"speed,omitempty"`
+	CounterStrafed    *bool    `json:"counter_strafed,omitempty"`
+	CrosshairAngleDeg *float32 `json:"crosshair_angle_deg,omitempty"`
 }
 
 type EventDamage struct {
@@ -186,6 +192,58 @@ type Result struct {
 	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
 }
 
+type playerFrame struct {
+	pos   r3.Vector
+	speed float32
+	team  common.Team
+	alive bool
+}
+
+// Source 2 pawn velocity. PropertyValue.R3Vec() panics on unexpected
+// shapes; defer/recover keeps a malformed entity from killing the parse.
+func pawnVelocity(p *common.Player) (r3.Vector, bool) {
+	if p == nil {
+		return r3.Vector{}, false
+	}
+	pawn := p.PlayerPawnEntity()
+	if pawn == nil {
+		return r3.Vector{}, false
+	}
+	pv, ok := pawn.PropertyValue("m_vecVelocity")
+	if !ok {
+		return r3.Vector{}, false
+	}
+	defer func() { _ = recover() }()
+	return pv.R3Vec(), true
+}
+
+func angleBetweenDeg(a, b r3.Vector) float32 {
+	la := math.Sqrt(a.X*a.X + a.Y*a.Y + a.Z*a.Z)
+	lb := math.Sqrt(b.X*b.X + b.Y*b.Y + b.Z*b.Z)
+	if la == 0 || lb == 0 {
+		return 180
+	}
+	cos := (a.X*b.X + a.Y*b.Y + a.Z*b.Z) / (la * lb)
+	if cos > 1 {
+		cos = 1
+	} else if cos < -1 {
+		cos = -1
+	}
+	return float32(math.Acos(cos) * 180 / math.Pi)
+}
+
+// CS eye angles → unit vector. Z-up; pitch>0 looks down.
+func viewVector(yawDeg, pitchDeg float32) r3.Vector {
+	yaw := float64(yawDeg) * math.Pi / 180
+	pitch := float64(pitchDeg) * math.Pi / 180
+	cp := math.Cos(pitch)
+	return r3.Vector{
+		X: cp * math.Cos(yaw),
+		Y: cp * math.Sin(yaw),
+		Z: -math.Sin(pitch),
+	}
+}
+
 // grenadeTypeCode maps an EquipmentType to the wire string used in
 // EventGrenadeThrow / EventGrenadeDetonate. Returns "" for non-grenades.
 func grenadeTypeCode(t common.EquipmentType) string {
@@ -255,6 +313,8 @@ func Parse(r io.Reader) (*Result, error) {
 	// an EventSpotted on the rising edge (new spotter appears) — losing
 	// sight is implicit and would just spam the timeline.
 	seenSpotters := map[string]map[string]struct{}{}
+
+	frames := map[string]playerFrame{}
 
 	// Accumulate player names as we observe them via kill events. Map
 	// here for de-dup; we flatten to the slice form on the Result at
@@ -448,6 +508,33 @@ func Parse(r io.Reader) (*Result, error) {
 		})
 	})
 
+	parser.RegisterEventHandler(func(_ events.FrameDone) {
+		if !matchStarted {
+			return
+		}
+		clear(frames)
+		for _, p := range parser.GameState().Participants().Playing() {
+			if p == nil || !p.IsAlive() {
+				continue
+			}
+			sid := steamIDStr(p)
+			if sid == "" {
+				continue
+			}
+			vel, ok := pawnVelocity(p)
+			speed := float32(0)
+			if ok {
+				speed = float32(math.Sqrt(vel.X*vel.X + vel.Y*vel.Y))
+			}
+			frames[sid] = playerFrame{
+				pos:   p.Position(),
+				speed: speed,
+				team:  p.Team,
+				alive: true,
+			}
+		}
+	})
+
 	// WeaponFire — one row per shot. Filter to firearm classes only:
 	// knives and grenade "fires" would balloon the array and don't
 	// participate in accuracy metrics. demoinfocs's EquipmentClass
@@ -463,13 +550,54 @@ func Parse(r io.Reader) (*Result, error) {
 		default:
 			return
 		}
-		res.ShotsFired = append(res.ShotsFired, EventShotFired{
+		ev := EventShotFired{
 			Tick:            parser.GameState().IngameTick(),
 			Round:           currentRound,
 			AttackerSteamID: steamIDStr(e.Shooter),
 			AttackerTeam:    teamCode(e.Shooter.Team),
 			Weapon:          e.Weapon.String(),
-		})
+		}
+
+		if sf, ok := frames[ev.AttackerSteamID]; ok && sf.alive {
+			speed := sf.speed
+			// CS2 movement-accuracy floor.
+			counter := speed < 5
+			ev.Speed = &speed
+			ev.CounterStrafed = &counter
+
+			var (
+				bestDist  = math.Inf(1)
+				bestEnemy r3.Vector
+				haveEnemy bool
+			)
+			for sid, ef := range frames {
+				if sid == ev.AttackerSteamID || !ef.alive {
+					continue
+				}
+				if ef.team == sf.team || ef.team == common.TeamUnassigned || ef.team == common.TeamSpectators {
+					continue
+				}
+				d := ef.pos.Sub(sf.pos)
+				dist := d.X*d.X + d.Y*d.Y + d.Z*d.Z
+				if dist < bestDist {
+					bestDist = dist
+					bestEnemy = ef.pos
+					haveEnemy = true
+				}
+			}
+			if haveEnemy {
+				eyes, eok := e.Shooter.PositionEyes()
+				if !eok {
+					eyes = sf.pos
+				}
+				view := viewVector(e.Shooter.ViewDirectionX(), e.Shooter.ViewDirectionY())
+				toEnemy := bestEnemy.Sub(eyes)
+				angle := angleBetweenDeg(view, toEnemy)
+				ev.CrosshairAngleDeg = &angle
+			}
+		}
+
+		res.ShotsFired = append(res.ShotsFired, ev)
 	})
 
 	// PlayerHurt — one row per damage instance. Skip self-damage
