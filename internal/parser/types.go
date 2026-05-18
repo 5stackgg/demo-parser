@@ -6,11 +6,12 @@ import (
 )
 
 type RoundTick struct {
-	Round     int    `json:"round"`
-	StartTick int    `json:"start_tick"`
-	EndTick   int    `json:"end_tick"`
-	Winner    string `json:"winner,omitempty"`
-	Reason    int    `json:"reason,omitempty"`
+	Round         int    `json:"round"`
+	StartTick     int    `json:"start_tick"`
+	FreezeEndTick int    `json:"freeze_end_tick,omitempty"`
+	EndTick       int    `json:"end_tick"`
+	Winner        string `json:"winner,omitempty"`
+	Reason        int    `json:"reason,omitempty"`
 }
 
 type EventKill struct {
@@ -48,6 +49,44 @@ type EventShotFired struct {
 	IsSpray    bool     `json:"is_spray,omitempty"`
 	Speed      *float32 `json:"speed,omitempty"`
 	WasStopped *bool    `json:"was_stopped,omitempty"`
+	// AmmoInMagazine = rounds remaining in the magazine BEFORE this
+	// shot was fired. Consumer derives "wasted magazine" by detecting
+	// upward jumps between consecutive shots in the same round —
+	// any leftover ammo when the count resets was wasted on a reload.
+	AmmoInMagazine *int `json:"ammo_in_magazine,omitempty"`
+}
+
+// EventPosition is a low-frequency (~4Hz) sample of a single player's
+// world position + view yaw. The replay viewer interpolates between
+// adjacent samples to render a 2D radar timeline.
+type EventPosition struct {
+	Tick            int     `json:"tick"`
+	Round           int     `json:"round,omitempty"`
+	AttackerSteamID string  `json:"attacker,omitempty"`
+	Team            string  `json:"team,omitempty"`
+	Alive           bool    `json:"alive,omitempty"`
+	X               float32 `json:"x"`
+	Y               float32 `json:"y"`
+	Z               float32 `json:"z"`
+	Yaw             float32 `json:"yaw,omitempty"`
+	// Current HP at sample time. Lets the replay viewer render a
+	// boltobserv-style "wounded back" arc on the player dot.
+	Health int `json:"health,omitempty"`
+}
+
+// EventRoundInventory captures the count of each grenade type a player
+// is carrying at the moment freeze-time ends (i.e. right after the buy
+// phase). Combined with grenade throw events, this lets downstream
+// compute "unused utility $" — grenades bought but not thrown.
+type EventRoundInventory struct {
+	Round           int    `json:"round,omitempty"`
+	AttackerSteamID string `json:"attacker,omitempty"`
+	Team            string `json:"team,omitempty"`
+	Flash           int    `json:"flash,omitempty"`
+	Smoke           int    `json:"smoke,omitempty"`
+	HE              int    `json:"he,omitempty"`
+	Molotov         int    `json:"molotov,omitempty"`
+	Decoy           int    `json:"decoy,omitempty"`
 }
 
 type EventDamage struct {
@@ -119,6 +158,8 @@ type Result struct {
 	Spotted            []EventSpotted         `json:"spotted,omitempty"`
 	GrenadeThrows      []EventGrenadeThrow    `json:"grenade_throws,omitempty"`
 	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
+	RoundInventory     []EventRoundInventory  `json:"round_inventory,omitempty"`
+	Positions          []EventPosition        `json:"positions,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.

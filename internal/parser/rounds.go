@@ -1,6 +1,9 @@
 package parser
 
-import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+import (
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+)
 
 // matchStarted gates round event collection: demos always include
 // warmup + (optional) knife rounds before the actual match. Counting
@@ -29,6 +32,7 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	s.currentRound++
 	s.currentRoundStartTick = s.parser.GameState().IngameTick()
 	s.currentFreezeEndTick = 0
+	s.liveRound = false
 	// Entities are reused across rounds but visibility resets at
 	// freeze break, so a fresh sighting always starts each round.
 	s.visStart = map[string]map[string]visEntry{}
@@ -42,15 +46,66 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 
 // onRoundFreezetimeEnd marks the moment players can move/shoot. Used
 // as the TTD anchor — damage during freeze (knife-out, suicide) is
-// ignored downstream.
+// ignored downstream. Also snapshots each player's grenade inventory
+// for downstream "unused utility $" calculation.
 func (s *state) onRoundFreezetimeEnd(_ events.RoundFreezetimeEnd) {
 	if !s.matchStarted {
 		return
 	}
 	s.currentFreezeEndTick = s.parser.GameState().IngameTick()
+	s.liveRound = true
+	if n := len(s.res.RoundTicks); n > 0 {
+		s.res.RoundTicks[n-1].FreezeEndTick = s.currentFreezeEndTick
+	}
+	for _, p := range s.parser.GameState().Participants().Playing() {
+		if p == nil {
+			continue
+		}
+		sid := steamIDStr(p)
+		if sid == "" {
+			continue
+		}
+		var flash, smoke, he, molotov, decoy int
+		for _, w := range p.Weapons() {
+			if w == nil {
+				continue
+			}
+			switch w.Type {
+			case common.EqFlash:
+				flash++
+			case common.EqSmoke:
+				smoke++
+			case common.EqHE:
+				he++
+			case common.EqMolotov, common.EqIncendiary:
+				molotov++
+			case common.EqDecoy:
+				decoy++
+			}
+		}
+		if flash+smoke+he+molotov+decoy == 0 {
+			continue
+		}
+		s.res.RoundInventory = append(s.res.RoundInventory, EventRoundInventory{
+			Round:           s.currentRound,
+			AttackerSteamID: sid,
+			Team:            teamCode(p.Team),
+			Flash:           flash,
+			Smoke:           smoke,
+			HE:              he,
+			Molotov:         molotov,
+			Decoy:           decoy,
+		})
+	}
 }
 
 func (s *state) onRoundEnd(e events.RoundEnd) {
+	// Note: do NOT flip liveRound here. RoundEnd fires the instant a
+	// win condition is met (last kill / bomb explode / time-out) but
+	// the demo timeline keeps producing useful frames through the
+	// death cam and victory walkaround. Cutting position sampling at
+	// RoundEnd makes the replay feel chopped — wait for
+	// RoundEndOfficial below to flip the gate.
 	if !s.matchStarted || len(s.res.RoundTicks) == 0 {
 		return
 	}
@@ -61,6 +116,10 @@ func (s *state) onRoundEnd(e events.RoundEnd) {
 
 func (s *state) onRoundEndOfficial(_ events.RoundEndOfficial) {
 	s.captureMaxTick()
+	// Stop capturing per-tick data; RoundStart of the next round will
+	// reset the gate again (it's already false-on-RoundStart for the
+	// fresh freezetime).
+	s.liveRound = false
 	if !s.matchStarted || len(s.res.RoundTicks) == 0 {
 		return
 	}

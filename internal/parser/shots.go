@@ -55,6 +55,52 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			s.frames[sid] = f
 		}
 	}
+
+	// Snapshot live projectile positions so the detonate-event handlers
+	// can fall back to a reliable coordinate (demoinfocs returns stale
+	// or zeroed Position on some CS2 grenade events).
+	s.onFrameDoneGrenades()
+
+	// Sample ~4Hz for the 2D replay buffer. 64-tick demo ≈ every 16
+	// ticks; tickrate-aware so we still hit 4Hz on 128-tick demos.
+	if tickRate <= 0 {
+		return
+	}
+	sampleEvery := int(tickRate / 4)
+	if sampleEvery < 1 {
+		sampleEvery = 1
+	}
+	if s.lastPositionSampleTick != 0 && curTick-s.lastPositionSampleTick < sampleEvery {
+		return
+	}
+	s.lastPositionSampleTick = curTick
+	// Skip freezetime + end-of-round walkaround — the replay viewer
+	// auto-skips both, so persisting them is pure waste.
+	if !s.liveRound {
+		return
+	}
+	for _, p := range s.parser.GameState().Participants().Playing() {
+		if p == nil {
+			continue
+		}
+		sid := steamIDStr(p)
+		if sid == "" {
+			continue
+		}
+		pos := p.Position()
+		s.res.Positions = append(s.res.Positions, EventPosition{
+			Tick:            curTick,
+			Round:           s.currentRound,
+			AttackerSteamID: sid,
+			Team:            teamCode(p.Team),
+			Alive:           p.IsAlive(),
+			X:               float32(pos.X),
+			Y:               float32(pos.Y),
+			Z:               float32(pos.Z),
+			Yaw:             p.ViewDirectionX(),
+			Health:          p.Health(),
+		})
+	}
 }
 
 // onWeaponFire records one row per shot. Firearms only — knife and
@@ -120,6 +166,20 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		if maxSpd, ok := weaponMaxSpeed[e.Weapon.Type]; ok && maxSpd > 0 {
 			stopped := speed < 0.34*maxSpd
 			ev.WasStopped = &stopped
+		}
+	}
+
+	// AmmoInMagazine is captured AFTER the shot fires; add 1 to recover
+	// the pre-shot count. Downstream uses a sequence of these values to
+	// infer reloads (count increases between consecutive shots).
+	// Some weapons (knife, grenades that route through here, edge cases
+	// in CS2 demos) return a uint32 sentinel like 0xFFFFFFFF — cap to a
+	// sane range so the int4 DB column doesn't overflow.
+	if e.Weapon != nil {
+		ammoAfter := e.Weapon.AmmoInMagazine()
+		if ammoAfter >= 0 && ammoAfter < 1000 {
+			ammoBefore := ammoAfter + 1
+			ev.AmmoInMagazine = &ammoBefore
 		}
 	}
 

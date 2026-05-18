@@ -22,6 +22,12 @@ type state struct {
 	currentRoundStartTick int
 	currentFreezeEndTick  int
 	maxTick               int
+	// True only between RoundFreezetimeEnd and RoundEnd — the window
+	// when players can actually move and shoot. Per-tick data captured
+	// outside this window (freezetime, end-of-round walkaround) is
+	// discarded by the inLiveRound() gate since the replay viewer
+	// auto-skips it anyway; persisting it wastes DB rows and bandwidth.
+	liveRound bool
 
 	// (spotted, spotter) → first-sight tick + spotter eye angles.
 	// Set on rising edge of visibility, cleared on falling edge or
@@ -37,6 +43,24 @@ type state struct {
 
 	// steam_id → display name. Flattened to res.Players at the end.
 	playerNames map[string]string
+
+	// Last tick at which we emitted a position sample. Throttles
+	// per-tick FrameDone events down to ~4Hz for the 2D replay table.
+	lastPositionSampleTick int
+
+	// Grenade projectile last-known positions, keyed by entity id.
+	// demoinfocs' GrenadeEvent.Position is stale or zeroed for some
+	// CS2 demos; tracking the projectile entity's own Position() each
+	// frame and consulting it on the detonate event gives reliable
+	// coords.
+	grenadePos map[int]grenadeProjectile
+}
+
+type grenadeProjectile struct {
+	x, y, z float32
+	gtype   string
+	thrower string
+	team    string
 }
 
 // Parse reads a CS2 demo from r and returns the playback metadata,
@@ -56,6 +80,7 @@ func Parse(r io.Reader) (*Result, error) {
 		frames:      map[string]playerFrame{},
 		lastShot:    map[string]shotMark{},
 		playerNames: map[string]string{},
+		grenadePos:  map[int]grenadeProjectile{},
 	}
 	defer s.parser.Close()
 
@@ -94,6 +119,7 @@ func (s *state) registerHandlers() {
 	s.parser.RegisterEventHandler(s.onPlayerSpottersChanged)
 
 	s.parser.RegisterEventHandler(s.onGrenadeProjectileThrow)
+	s.parser.RegisterEventHandler(s.onGrenadeProjectileDestroy)
 	s.parser.RegisterEventHandler(s.onHeExplode)
 	s.parser.RegisterEventHandler(s.onFlashExplode)
 	s.parser.RegisterEventHandler(s.onSmokeStart)
