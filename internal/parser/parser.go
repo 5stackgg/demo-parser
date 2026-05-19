@@ -112,6 +112,12 @@ func (s *state) registerHandlers() {
 	s.parser.RegisterEventHandler(s.onBombPlanted)
 	s.parser.RegisterEventHandler(s.onBombDefused)
 	s.parser.RegisterEventHandler(s.onBombExplode)
+	s.parser.RegisterEventHandler(s.onBombPlantBegin)
+	s.parser.RegisterEventHandler(s.onBombPlantAborted)
+	s.parser.RegisterEventHandler(s.onBombDefuseStart)
+	s.parser.RegisterEventHandler(s.onBombDefuseAborted)
+	s.parser.RegisterEventHandler(s.onBombDropped)
+	s.parser.RegisterEventHandler(s.onBombPickup)
 
 	s.parser.RegisterEventHandler(s.onFrameDone)
 	s.parser.RegisterEventHandler(s.onWeaponFire)

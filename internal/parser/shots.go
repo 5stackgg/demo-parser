@@ -79,6 +79,12 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	if !s.liveRound {
 		return
 	}
+	// Bomb carrier this sample tick, if any. Compared against each
+	// player in the loop so we can flag the carrier on their sample.
+	var bombCarrier *common.Player
+	if b := s.parser.GameState().Bomb(); b != nil {
+		bombCarrier = b.Carrier
+	}
 	for _, p := range s.parser.GameState().Participants().Playing() {
 		if p == nil {
 			continue
@@ -99,6 +105,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			Z:               float32(pos.Z),
 			Yaw:             p.ViewDirectionX(),
 			Health:          p.Health(),
+			HasBomb:         bombCarrier != nil && bombCarrier == p,
 		})
 	}
 }

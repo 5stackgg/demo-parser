@@ -28,11 +28,19 @@ type EventKill struct {
 	ThroughSmoke  bool   `json:"smoke,omitempty"`
 }
 
+// EventBomb is a single timeline entry for a bomb interaction. Type
+// values: "planted", "defused", "exploded" (terminal events) and
+// "plant_begin", "plant_abort", "defuse_begin", "defuse_abort",
+// "dropped", "pickup" (in-flight events for visualizing carrier and
+// active plant/defuse states on the 2D replay).
 type EventBomb struct {
 	Tick   int    `json:"tick"`
 	Type   string `json:"type"`
 	Player string `json:"player,omitempty"`
 	Site   string `json:"site,omitempty"`
+	// HasKit is set on "defuse_begin" — tells the consumer whether to
+	// show a 5s (kit) or 10s (no kit) defuse window on the player.
+	HasKit bool `json:"has_kit,omitempty"`
 }
 
 type EventShotFired struct {
@@ -72,6 +80,10 @@ type EventPosition struct {
 	// Current HP at sample time. Lets the replay viewer render a
 	// boltobserv-style "wounded back" arc on the player dot.
 	Health int `json:"health,omitempty"`
+	// HasBomb is true when this player is the bomb carrier at this
+	// sample tick. The 2D replay uses it to render a small bomb icon
+	// on the carrier's marker between pickup and plant/drop.
+	HasBomb bool `json:"has_bomb,omitempty"`
 }
 
 // EventRoundInventory captures the count of each grenade type a player
