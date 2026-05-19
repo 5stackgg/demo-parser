@@ -146,6 +146,17 @@ func (s *state) finalize() {
 	}
 	s.res.TotalTicks = s.maxTick
 
+	// Backfill EndTick on the final round: RoundEndOfficial does not
+	// fire on the match-winning round (the engine cuts to the post-match
+	// scoreboard instead of the normal freeze-time transition), leaving
+	// EndTick == 0 and the round looking incomplete to consumers.
+	if n := len(s.res.RoundTicks); n > 0 {
+		last := &s.res.RoundTicks[n-1]
+		if last.EndTick == 0 && s.maxTick > 0 {
+			last.EndTick = s.maxTick
+		}
+	}
+
 	for _, p := range s.parser.GameState().Participants().All() {
 		s.recordPlayerName(p)
 	}
