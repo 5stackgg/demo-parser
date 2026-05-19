@@ -41,6 +41,27 @@ type EventBomb struct {
 	// HasKit is set on "defuse_begin" — tells the consumer whether to
 	// show a 5s (kit) or 10s (no kit) defuse window on the player.
 	HasKit bool `json:"has_kit,omitempty"`
+	// Position of the bomb at this event. Captured on "dropped" and
+	// "planted" so the 2D replay can render the bomb on the ground
+	// between drop and pickup, and at the plant site after detonation.
+	X float32 `json:"x,omitempty"`
+	Y float32 `json:"y,omitempty"`
+	Z float32 `json:"z,omitempty"`
+}
+
+// EventKitDrop marks the spot where a CT lost their defuse kit
+// (currently only emitted when the kit-holder dies, since that's when
+// the kit physically becomes pickable on the ground). The 2D replay
+// renders a small kit icon at this location until another CT moves
+// over it (the consumer doesn't currently see the pickup event — kit
+// stays rendered for the rest of the round).
+type EventKitDrop struct {
+	Tick   int     `json:"tick"`
+	Round  int     `json:"round,omitempty"`
+	Player string  `json:"player,omitempty"`
+	X      float32 `json:"x"`
+	Y      float32 `json:"y"`
+	Z      float32 `json:"z"`
 }
 
 type EventShotFired struct {
@@ -84,6 +105,10 @@ type EventPosition struct {
 	// sample tick. The 2D replay uses it to render a small bomb icon
 	// on the carrier's marker between pickup and plant/drop.
 	HasBomb bool `json:"has_bomb,omitempty"`
+	// HasDefuser is true for CTs carrying a defuse kit. Lets the
+	// replay overlay show a small kit indicator so viewers can see
+	// which CT will get the 5s defuse window.
+	HasDefuser bool `json:"has_defuser,omitempty"`
 }
 
 // EventRoundInventory captures the count of each grenade type a player
@@ -172,6 +197,7 @@ type Result struct {
 	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
 	RoundInventory     []EventRoundInventory  `json:"round_inventory,omitempty"`
 	Positions          []EventPosition        `json:"positions,omitempty"`
+	KitDrops           []EventKitDrop         `json:"kit_drops,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.

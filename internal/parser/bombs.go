@@ -1,6 +1,20 @@
 package parser
 
-import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+import (
+	"github.com/golang/geo/r3"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+)
+
+// liveBombPos returns the bomb's current world position — either the
+// carrier's position or LastOnGroundPosition. Returns a zero vector
+// (and false) if the GameState() doesn't know about the bomb yet.
+func (s *state) liveBombPos() (r3.Vector, bool) {
+	b := s.parser.GameState().Bomb()
+	if b == nil {
+		return r3.Vector{}, false
+	}
+	return b.Position(), true
+}
 
 // Bomb events — three distinct types collapsed into a single list
 // with a `type` discriminator. Reads naturally on a frontend as one
@@ -10,12 +24,16 @@ func (s *state) onBombPlanted(e events.BombPlanted) {
 	if !s.matchStarted {
 		return
 	}
-	s.res.Bombs = append(s.res.Bombs, EventBomb{
+	ev := EventBomb{
 		Tick:   s.parser.GameState().IngameTick(),
 		Type:   "planted",
 		Player: steamIDStr(e.Player),
 		Site:   bombSiteCode(e.Site),
-	})
+	}
+	if pos, ok := s.liveBombPos(); ok {
+		ev.X, ev.Y, ev.Z = float32(pos.X), float32(pos.Y), float32(pos.Z)
+	}
+	s.res.Bombs = append(s.res.Bombs, ev)
 }
 
 func (s *state) onBombDefused(e events.BombDefused) {
@@ -91,11 +109,22 @@ func (s *state) onBombDropped(e events.BombDropped) {
 	if !s.matchStarted {
 		return
 	}
-	s.res.Bombs = append(s.res.Bombs, EventBomb{
+	ev := EventBomb{
 		Tick:   s.parser.GameState().IngameTick(),
 		Type:   "dropped",
 		Player: steamIDStr(e.Player),
-	})
+	}
+	// Bomb position right at drop time = where the player was standing.
+	// `e.Player.Position()` is more reliable than reading `GameState().
+	// Bomb().Position()` during the event itself, since the bomb entity
+	// may not yet be marked as on-ground.
+	if e.Player != nil {
+		pos := e.Player.Position()
+		ev.X, ev.Y, ev.Z = float32(pos.X), float32(pos.Y), float32(pos.Z)
+	} else if pos, ok := s.liveBombPos(); ok {
+		ev.X, ev.Y, ev.Z = float32(pos.X), float32(pos.Y), float32(pos.Z)
+	}
+	s.res.Bombs = append(s.res.Bombs, ev)
 }
 
 func (s *state) onBombPickup(e events.BombPickup) {

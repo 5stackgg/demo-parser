@@ -1,6 +1,9 @@
 package parser
 
-import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+import (
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+)
 
 // Killer/victim may be nil on world damage or partially corrupt
 // demos; record what we can either way.
@@ -31,4 +34,22 @@ func (s *state) onKill(e events.Kill) {
 		k.Weapon = e.Weapon.String()
 	}
 	s.res.Kills = append(s.res.Kills, k)
+
+	// A CT carrying a defuse kit drops it on death — record the spot
+	// so the replay can render a kit icon at that location until
+	// another CT picks it up. (We don't yet track pickup; for now the
+	// renderer keeps the marker for the rest of the round.)
+	if e.Victim != nil &&
+		e.Victim.Team == common.TeamCounterTerrorists &&
+		e.Victim.HasDefuseKit() {
+		pos := e.Victim.Position()
+		s.res.KitDrops = append(s.res.KitDrops, EventKitDrop{
+			Tick:   s.parser.GameState().IngameTick(),
+			Round:  s.currentRound,
+			Player: steamIDStr(e.Victim),
+			X:      float32(pos.X),
+			Y:      float32(pos.Y),
+			Z:      float32(pos.Z),
+		})
+	}
 }

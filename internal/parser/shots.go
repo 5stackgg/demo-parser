@@ -79,11 +79,13 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	if !s.liveRound {
 		return
 	}
-	// Bomb carrier this sample tick, if any. Compared against each
-	// player in the loop so we can flag the carrier on their sample.
-	var bombCarrier *common.Player
-	if b := s.parser.GameState().Bomb(); b != nil {
-		bombCarrier = b.Carrier
+	// Bomb carrier this sample tick, if any. Match by SteamID rather
+	// than pointer — the carrier pointer is generally stable across
+	// frames in v5, but some demos churn the participants slice and
+	// SteamID is the only identity that survives reliably.
+	var carrierSID string
+	if b := s.parser.GameState().Bomb(); b != nil && b.Carrier != nil {
+		carrierSID = steamIDStr(b.Carrier)
 	}
 	for _, p := range s.parser.GameState().Participants().Playing() {
 		if p == nil {
@@ -105,7 +107,8 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			Z:               float32(pos.Z),
 			Yaw:             p.ViewDirectionX(),
 			Health:          p.Health(),
-			HasBomb:         bombCarrier != nil && bombCarrier == p,
+			HasBomb:         carrierSID != "" && sid == carrierSID,
+			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
 		})
 	}
 }
