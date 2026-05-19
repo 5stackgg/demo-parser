@@ -107,6 +107,8 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			Z:               float32(pos.Z),
 			Yaw:             p.ViewDirectionX(),
 			Health:          p.Health(),
+			Armor:           p.Armor(),
+			HasHelmet:       p.HasHelmet(),
 			HasBomb:         carrierSID != "" && sid == carrierSID,
 			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
 		})

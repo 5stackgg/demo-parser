@@ -101,6 +101,13 @@ type EventPosition struct {
 	// Current HP at sample time. Lets the replay viewer render a
 	// boltobserv-style "wounded back" arc on the player dot.
 	Health int `json:"health,omitempty"`
+	// Current armor at sample time (0–100). Rendered behind the HP
+	// bar in the replay so a coach can see who still has kevlar.
+	Armor int `json:"armor,omitempty"`
+	// Helmet is true when the player has a helmet on this sample.
+	// The replay tints the armor bar based on this so a coach can
+	// instantly tell kevlar from kevlar+helmet.
+	HasHelmet bool `json:"helmet,omitempty"`
 	// HasBomb is true when this player is the bomb carrier at this
 	// sample tick. The 2D replay uses it to render a small bomb icon
 	// on the carrier's marker between pickup and plant/drop.
