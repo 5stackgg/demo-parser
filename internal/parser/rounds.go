@@ -66,6 +66,7 @@ func (s *state) onRoundFreezetimeEnd(_ events.RoundFreezetimeEnd) {
 			continue
 		}
 		var flash, smoke, he, molotov, decoy int
+		var primary, secondary string
 		for _, w := range p.Weapons() {
 			if w == nil {
 				continue
@@ -82,8 +83,24 @@ func (s *state) onRoundFreezetimeEnd(_ events.RoundFreezetimeEnd) {
 			case common.EqDecoy:
 				decoy++
 			}
+			switch w.Class() {
+			case common.EqClassRifle, common.EqClassSMG, common.EqClassHeavy:
+				if primary == "" {
+					primary = w.String()
+				}
+			case common.EqClassPistols:
+				if secondary == "" {
+					secondary = w.String()
+				}
+			}
 		}
-		if flash+smoke+he+molotov+decoy == 0 {
+		armor := p.Armor()
+		helmet := p.HasHelmet()
+		kit := p.Team == common.TeamCounterTerrorists && p.HasDefuseKit()
+		empty := flash+smoke+he+molotov+decoy == 0 &&
+			primary == "" && secondary == "" &&
+			armor == 0 && !kit
+		if empty {
 			continue
 		}
 		s.res.RoundInventory = append(s.res.RoundInventory, EventRoundInventory{
@@ -95,6 +112,11 @@ func (s *state) onRoundFreezetimeEnd(_ events.RoundFreezetimeEnd) {
 			HE:              he,
 			Molotov:         molotov,
 			Decoy:           decoy,
+			Primary:         primary,
+			Secondary:       secondary,
+			Armor:           armor,
+			Helmet:          helmet,
+			Kit:             kit,
 		})
 	}
 }

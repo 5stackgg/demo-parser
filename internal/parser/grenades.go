@@ -22,6 +22,16 @@ func (s *state) onGrenadeProjectileThrow(e events.GrenadeProjectileThrow) {
 		return
 	}
 	pos := e.Projectile.Position()
+	// CS2 demos sometimes report (0,0,0) for the projectile entity on
+	// the very tick it spawns — the entity is created but its origin
+	// hasn't synced yet. Fall back to the thrower's position so the
+	// throw doesn't get plotted at the map origin.
+	if (pos.X == 0 && pos.Y == 0) && thrower != nil {
+		tp := thrower.Position()
+		pos.X = tp.X
+		pos.Y = tp.Y
+		pos.Z = tp.Z
+	}
 	ev := EventGrenadeThrow{
 		Tick:    s.parser.GameState().IngameTick(),
 		Round:   s.currentRound,

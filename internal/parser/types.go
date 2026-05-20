@@ -118,10 +118,11 @@ type EventPosition struct {
 	HasDefuser bool `json:"has_defuser,omitempty"`
 }
 
-// EventRoundInventory captures the count of each grenade type a player
-// is carrying at the moment freeze-time ends (i.e. right after the buy
-// phase). Combined with grenade throw events, this lets downstream
-// compute "unused utility $" — grenades bought but not thrown.
+// EventRoundInventory captures what a player is carrying at the moment
+// freeze-time ends (i.e. right after the buy phase). Grenade counts are
+// used downstream to compute "unused utility $". Primary/secondary
+// weapon, armor, and defuse-kit are surfaced in the 2D replay viewer so
+// a coach can see each player's round loadout next to their name.
 type EventRoundInventory struct {
 	Round           int    `json:"round,omitempty"`
 	AttackerSteamID string `json:"attacker,omitempty"`
@@ -131,6 +132,11 @@ type EventRoundInventory struct {
 	HE              int    `json:"he,omitempty"`
 	Molotov         int    `json:"molotov,omitempty"`
 	Decoy           int    `json:"decoy,omitempty"`
+	Primary         string `json:"primary,omitempty"`
+	Secondary       string `json:"secondary,omitempty"`
+	Armor           int    `json:"armor,omitempty"`
+	Helmet          bool   `json:"helmet,omitempty"`
+	Kit             bool   `json:"kit,omitempty"`
 }
 
 type EventDamage struct {
