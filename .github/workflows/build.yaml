@@ -6,38 +6,83 @@ on:
       - "main"
   workflow_dispatch:
 
-jobs:
-  build-push-and-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+concurrency:
+  group: build
+  cancel-in-progress: true
 
+jobs:
+  build-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
+      - name: Log in to GitHub Docker Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push Docker image
+      - name: Build and push AMD64 image
         uses: docker/build-push-action@v6
         with:
+          context: .
+          file: ./Dockerfile
           push: true
+          platforms: linux/amd64
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache-amd64
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache-amd64,mode=max
           tags: |
-            ghcr.io/${{ github.repository_owner }}/demo-parser:latest
-            ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache
-          cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache,mode=max
-
+            ghcr.io/${{ github.repository_owner }}/demo-parser:latest-amd64
+            ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }}-amd64
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/arm64
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache-arm64
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/demo-parser:buildcache-arm64,mode=max
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/demo-parser:latest-arm64
+            ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }}-arm64
+  merge:
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GitHub Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create manifest list and push
+        run: |
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/demo-parser:latest \
+            ghcr.io/${{ github.repository_owner }}/demo-parser:latest-amd64 \
+            ghcr.io/${{ github.repository_owner }}/demo-parser:latest-arm64
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }} \
+            ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }}-amd64 \
+            ghcr.io/${{ github.repository_owner }}/demo-parser:${{ github.sha }}-arm64
       - name: Delete Package Versions
         uses: actions/delete-package-versions@v5
         with:
           package-name: demo-parser
           package-type: container
-          min-versions-to-keep: 8
+          min-versions-to-keep: 9
           ignore-versions: '^buildcache-*'
