@@ -22,6 +22,11 @@ type state struct {
 	currentRoundStartTick int
 	currentFreezeEndTick  int
 	maxTick               int
+	// Tick of the most recent RoundEnd event (win condition met).
+	// Used to backfill the final round's EndTick to a tight bound
+	// instead of s.maxTick, which spans the entire post-match
+	// cinematic / victory walkaround.
+	lastRoundEndTick int
 	// True only between RoundFreezetimeEnd and RoundEnd — the window
 	// when players can actually move and shoot. Per-tick data captured
 	// outside this window (freezetime, end-of-round walkaround) is
@@ -150,10 +155,33 @@ func (s *state) finalize() {
 	// fire on the match-winning round (the engine cuts to the post-match
 	// scoreboard instead of the normal freeze-time transition), leaving
 	// EndTick == 0 and the round looking incomplete to consumers.
+	//
+	// Using s.maxTick here would extend the round's window across the
+	// entire post-match cinematic (victory walkaround, MVP screen,
+	// scoreboard) — downstream consumers like the highlight builder
+	// would then attribute cinematic-era ticks to the final round and
+	// could render clips that bleed into the winner screen. Backfill
+	// from the RoundEnd tick (when the win condition was met) plus a
+	// buffer matching the typical RoundEndOfficial freeze delay.
 	if n := len(s.res.RoundTicks); n > 0 {
 		last := &s.res.RoundTicks[n-1]
-		if last.EndTick == 0 && s.maxTick > 0 {
-			last.EndTick = s.maxTick
+		if last.EndTick == 0 {
+			end := 0
+			if s.lastRoundEndTick > 0 {
+				buf := 0
+				if rate := s.parser.TickRate(); rate > 0 {
+					buf = int(rate * 5)
+				}
+				end = s.lastRoundEndTick + buf
+			}
+			if end == 0 || (s.maxTick > 0 && end > s.maxTick) {
+				if s.maxTick > 0 {
+					end = s.maxTick
+				}
+			}
+			if end > 0 {
+				last.EndTick = end
+			}
 		}
 	}
 

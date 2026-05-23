@@ -131,6 +131,7 @@ func (s *state) onRoundEnd(e events.RoundEnd) {
 	if !s.matchStarted || len(s.res.RoundTicks) == 0 {
 		return
 	}
+	s.lastRoundEndTick = s.parser.GameState().IngameTick()
 	last := &s.res.RoundTicks[len(s.res.RoundTicks)-1]
 	last.Winner = teamCode(e.Winner)
 	last.Reason = int(e.Reason)
