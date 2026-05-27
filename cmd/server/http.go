@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"compress/bzip2"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,7 +70,8 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 	if logPrefix == "" {
 		logPrefix = "<no-id>"
 	}
-	log.Printf("[%s] fetching demo", logPrefix)
+	log.Printf("[%s] fetching demo %s", logPrefix, req.DemoURL)
+	fetchStart := time.Now()
 
 	demoResp, err := http.Get(req.DemoURL)
 	if err != nil {
@@ -82,8 +86,45 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	log.Printf("[%s] fetched demo in %s (Content-Length=%s)",
+		logPrefix,
+		time.Since(fetchStart),
+		demoResp.Header.Get("Content-Length"),
+	)
 
-	parseAndRespond(w, demoResp.Body, logPrefix)
+	body, err := sniffDemoStream(demoResp.Body, logPrefix)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	log.Printf("[%s] parsing demo", logPrefix)
+	parseAndRespond(w, body, logPrefix)
+}
+
+// sniffDemoStream inspects the first 8 bytes to decide whether the
+// body is bzip2-compressed, a raw CS:GO/CS2 demo, or something else
+// entirely (an HTML error page from Valve's CDN when a demo has been
+// tombstoned). For raw demos we accept either HL2DEMO (legacy) or
+// PBDEMS2 (CS2 source 2 protobuf). Anything else returns an error
+// with the magic bytes so the caller can see what was actually served.
+func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
+	br := bufio.NewReader(body)
+	magic, err := br.Peek(8)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read demo head: %w", err)
+	}
+	if len(magic) < 3 {
+		return nil, fmt.Errorf("demo too short (%d bytes)", len(magic))
+	}
+	if bytes.HasPrefix(magic, []byte("BZh")) {
+		return bzip2.NewReader(br), nil
+	}
+	if bytes.HasPrefix(magic, []byte("HL2DEMO")) ||
+		bytes.HasPrefix(magic, []byte("PBDEMS2")) {
+		return br, nil
+	}
+	log.Printf("[%s] unrecognized demo magic: %q", logPrefix, magic)
+	return nil, fmt.Errorf("unrecognized demo content: %q", magic)
 }
 
 // handleParseFile is the pre-upload entry point used by a game-server

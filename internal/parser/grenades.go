@@ -181,3 +181,29 @@ func (s *state) onFireGrenadeStart(e events.FireGrenadeStart) {
 	}
 	s.emitDetonate(e.GrenadeEvent, "Molotov")
 }
+
+// onPlayerFlashed fires once per blinded player per flash. We capture
+// the attacker (thrower), the victim, and the resulting blind duration
+// so player_flashes aggregates (enemies_flashed / team_flashed /
+// avg_blind_time) work for imported demos.
+func (s *state) onPlayerFlashed(e events.PlayerFlashed) {
+	if !s.matchStarted {
+		return
+	}
+	if e.Player == nil || e.Attacker == nil {
+		return
+	}
+	attackerTeam := teamCode(e.Attacker.Team)
+	victimTeam := teamCode(e.Player.Team)
+	ev := EventFlash{
+		Tick:            s.parser.GameState().IngameTick(),
+		Round:           s.currentRound,
+		AttackerSteamID: steamIDStr(e.Attacker),
+		AttackerTeam:    attackerTeam,
+		VictimSteamID:   steamIDStr(e.Player),
+		VictimTeam:      victimTeam,
+		Duration:        e.Player.FlashDurationTime().Seconds(),
+		TeamFlash:       attackerTeam != "" && attackerTeam == victimTeam,
+	}
+	s.res.Flashes = append(s.res.Flashes, ev)
+}

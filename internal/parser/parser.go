@@ -49,6 +49,10 @@ type state struct {
 	// steam_id → display name. Flattened to res.Players at the end.
 	playerNames map[string]string
 
+	// steam_id → most recent observed rank + rank_type from the demo
+	// scoreboard. Premier (rank_type=11) gives the CS Rating number.
+	playerRanks map[string]playerRank
+
 	// Last tick at which we emitted a position sample. Throttles
 	// per-tick FrameDone events down to ~4Hz for the 2D replay table.
 	lastPositionSampleTick int
@@ -85,6 +89,7 @@ func Parse(r io.Reader) (*Result, error) {
 		frames:      map[string]playerFrame{},
 		lastShot:    map[string]shotMark{},
 		playerNames: map[string]string{},
+		playerRanks: map[string]playerRank{},
 		grenadePos:  map[int]grenadeProjectile{},
 	}
 	defer s.parser.Close()
@@ -135,6 +140,7 @@ func (s *state) registerHandlers() {
 	s.parser.RegisterEventHandler(s.onFlashExplode)
 	s.parser.RegisterEventHandler(s.onSmokeStart)
 	s.parser.RegisterEventHandler(s.onFireGrenadeStart)
+	s.parser.RegisterEventHandler(s.onPlayerFlashed)
 }
 
 // finalize resolves header-equivalent fields from the live parser
@@ -187,6 +193,7 @@ func (s *state) finalize() {
 
 	for _, p := range s.parser.GameState().Participants().All() {
 		s.recordPlayerName(p)
+		s.recordPlayerRank(p)
 	}
 
 	if len(s.playerNames) == 0 {
@@ -199,9 +206,12 @@ func (s *state) finalize() {
 	}
 	sort.Strings(ids)
 	for _, sid := range ids {
+		rank := s.playerRanks[sid]
 		s.res.Players = append(s.res.Players, PlayerInfo{
-			SteamID: sid,
-			Name:    s.playerNames[sid],
+			SteamID:  sid,
+			Name:     s.playerNames[sid],
+			Rank:     rank.rank,
+			RankType: rank.rankType,
 		})
 	}
 }

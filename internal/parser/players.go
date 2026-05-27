@@ -43,6 +43,27 @@ func (s *state) onPlayerNameChange(e events.PlayerNameChange) {
 	s.recordPlayerName(e.Player)
 }
 
+type playerRank struct {
+	rank     int
+	rankType int
+}
+
+func (s *state) recordPlayerRank(p *common.Player) {
+	if p == nil || p.IsBot {
+		return
+	}
+	sid := steamIDStr(p)
+	if sid == "" {
+		return
+	}
+	rt := p.RankType()
+	r := p.Rank()
+	if rt <= 0 && r <= 0 {
+		return
+	}
+	s.playerRanks[sid] = playerRank{rank: r, rankType: rt}
+}
+
 func (s *state) recordPlayerName(p *common.Player) {
 	if p == nil || p.IsBot {
 		return

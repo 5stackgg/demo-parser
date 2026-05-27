@@ -118,6 +118,17 @@ type EventPosition struct {
 	HasDefuser bool `json:"has_defuser,omitempty"`
 }
 
+type EventFlash struct {
+	Tick            int     `json:"tick"`
+	Round           int     `json:"round,omitempty"`
+	AttackerSteamID string  `json:"attacker,omitempty"`
+	AttackerTeam    string  `json:"attacker_team,omitempty"`
+	VictimSteamID   string  `json:"victim,omitempty"`
+	VictimTeam      string  `json:"victim_team,omitempty"`
+	Duration        float64 `json:"duration,omitempty"`
+	TeamFlash       bool    `json:"team_flash,omitempty"`
+}
+
 type EventRoundInventory struct {
 	Round           int    `json:"round,omitempty"`
 	AttackerSteamID string `json:"attacker,omitempty"`
@@ -184,8 +195,10 @@ type EventGrenadeDetonate struct {
 }
 
 type PlayerInfo struct {
-	SteamID string `json:"steam_id"`
-	Name    string `json:"name"`
+	SteamID  string `json:"steam_id"`
+	Name     string `json:"name"`
+	Rank     int    `json:"rank,omitempty"`
+	RankType int    `json:"rank_type,omitempty"`
 }
 
 type Result struct {
@@ -203,6 +216,7 @@ type Result struct {
 	Spotted            []EventSpotted         `json:"spotted,omitempty"`
 	GrenadeThrows      []EventGrenadeThrow    `json:"grenade_throws,omitempty"`
 	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
+	Flashes            []EventFlash           `json:"flashes,omitempty"`
 	RoundInventory     []EventRoundInventory  `json:"round_inventory,omitempty"`
 	Positions          []EventPosition        `json:"positions,omitempty"`
 	KitDrops           []EventKitDrop         `json:"kit_drops,omitempty"`
