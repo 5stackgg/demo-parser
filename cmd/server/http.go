@@ -70,35 +70,74 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 	if logPrefix == "" {
 		logPrefix = "<no-id>"
 	}
-	log.Printf("[%s] fetching demo %s", logPrefix, req.DemoURL)
-	fetchStart := time.Now()
 
-	demoResp, err := http.Get(req.DemoURL)
+	f, err := downloadDemo(req.DemoURL, logPrefix)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("fetch demo: %v", err), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer demoResp.Body.Close()
-	if demoResp.StatusCode >= 400 {
-		http.Error(w,
-			fmt.Sprintf("fetch demo: upstream %d", demoResp.StatusCode),
-			http.StatusBadGateway,
-		)
-		return
-	}
-	log.Printf("[%s] fetched demo in %s (Content-Length=%s)",
-		logPrefix,
-		time.Since(fetchStart),
-		demoResp.Header.Get("Content-Length"),
-	)
+	defer func() {
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
+	}()
 
-	body, err := sniffDemoStream(demoResp.Body, logPrefix)
+	body, err := sniffDemoStream(f, logPrefix)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	log.Printf("[%s] parsing demo", logPrefix)
 	parseAndRespond(w, body, logPrefix)
+}
+
+// demoClient drains the demo CDN at full network speed. Valve's replay
+// servers drop a connection that stays idle, so the download must not be
+// paced by the parser — handleParse buffers the whole body to a temp file
+// before parsing rather than streaming the socket straight into the parser.
+var demoClient = &http.Client{Timeout: 5 * time.Minute}
+
+// downloadDemo fetches the demo to a temp file and verifies the byte count
+// against Content-Length. A truncated download (CDN dropped the connection)
+// becomes a hard error here instead of a silent partial parse downstream.
+// The returned file is rewound to the start; the caller owns its cleanup.
+func downloadDemo(url, logPrefix string) (*os.File, error) {
+	log.Printf("[%s] fetching demo %s", logPrefix, url)
+	fetchStart := time.Now()
+
+	resp, err := demoClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch demo: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fetch demo: upstream %d", resp.StatusCode)
+	}
+
+	f, err := os.CreateTemp("", "demo-*.dem")
+	if err != nil {
+		return nil, fmt.Errorf("create temp: %v", err)
+	}
+
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, fmt.Errorf("download demo (after %d bytes): %w", n, err)
+	}
+	if want := resp.ContentLength; want > 0 && n != want {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, fmt.Errorf("download truncated: got %d of %d bytes", n, want)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, fmt.Errorf("rewind temp: %v", err)
+	}
+
+	log.Printf("[%s] downloaded %d bytes in %s", logPrefix, n, time.Since(fetchStart))
+	return f, nil
 }
 
 // sniffDemoStream inspects the first 8 bytes to decide whether the
