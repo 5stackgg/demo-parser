@@ -10,7 +10,9 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/5stackgg/demo-parser/internal/parser"
@@ -91,53 +93,95 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 	parseAndRespond(w, body, logPrefix)
 }
 
-// demoClient drains the demo CDN at full network speed. Valve's replay
-// servers drop a connection that stays idle, so the download must not be
-// paced by the parser — handleParse buffers the whole body to a temp file
-// before parsing rather than streaming the socket straight into the parser.
 var demoClient = &http.Client{Timeout: 5 * time.Minute}
 
-// downloadDemo fetches the demo to a temp file and verifies the byte count
-// against Content-Length. A truncated download (CDN dropped the connection)
-// becomes a hard error here instead of a silent partial parse downstream.
-// The returned file is rewound to the start; the caller owns its cleanup.
+const demoDownloadAttempts = 3
+
+// One in-flight download per CDN host. Valve's replay servers 502 under
+// concurrent load, so requests to the same replayNNN.valve.net host are
+// serialized while different hosts still download in parallel.
+var (
+	hostLocksMu sync.Mutex
+	hostLocks   = map[string]*sync.Mutex{}
+)
+
+func hostLock(host string) *sync.Mutex {
+	hostLocksMu.Lock()
+	defer hostLocksMu.Unlock()
+	l := hostLocks[host]
+	if l == nil {
+		l = &sync.Mutex{}
+		hostLocks[host] = l
+	}
+	return l
+}
+
+// Valve's replay CDN intermittently drops connections mid-stream and returns
+// transient 5xx, so retry those with backoff. 4xx (e.g. an expired demo) is
+// permanent and returned immediately.
 func downloadDemo(url, logPrefix string) (*os.File, error) {
 	log.Printf("[%s] fetching demo %s", logPrefix, url)
+	var lastErr error
+	for attempt := 1; attempt <= demoDownloadAttempts; attempt++ {
+		f, retryable, err := downloadDemoOnce(url, logPrefix)
+		if err == nil {
+			return f, nil
+		}
+		lastErr = err
+		if !retryable || attempt == demoDownloadAttempts {
+			break
+		}
+		backoff := time.Duration(attempt*2) * time.Second
+		log.Printf("[%s] download attempt %d/%d failed (%v); retrying in %s",
+			logPrefix, attempt, demoDownloadAttempts, err, backoff)
+		time.Sleep(backoff)
+	}
+	return nil, lastErr
+}
+
+func downloadDemoOnce(demoURL, logPrefix string) (*os.File, bool, error) {
 	fetchStart := time.Now()
 
-	resp, err := demoClient.Get(url)
+	if u, err := url.Parse(demoURL); err == nil && u.Host != "" {
+		l := hostLock(u.Host)
+		l.Lock()
+		defer l.Unlock()
+	}
+
+	resp, err := demoClient.Get(demoURL)
 	if err != nil {
-		return nil, fmt.Errorf("fetch demo: %v", err)
+		return nil, true, fmt.Errorf("fetch demo: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("fetch demo: upstream %d", resp.StatusCode)
+		retryable := resp.StatusCode >= 500 || resp.StatusCode == 429
+		return nil, retryable, fmt.Errorf("fetch demo: upstream %d", resp.StatusCode)
 	}
 
 	f, err := os.CreateTemp("", "demo-*.dem")
 	if err != nil {
-		return nil, fmt.Errorf("create temp: %v", err)
+		return nil, false, fmt.Errorf("create temp: %v", err)
 	}
 
 	n, err := io.Copy(f, resp.Body)
 	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return nil, fmt.Errorf("download demo (after %d bytes): %w", n, err)
+		return nil, true, fmt.Errorf("download demo (after %d bytes): %w", n, err)
 	}
 	if want := resp.ContentLength; want > 0 && n != want {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return nil, fmt.Errorf("download truncated: got %d of %d bytes", n, want)
+		return nil, true, fmt.Errorf("download truncated: got %d of %d bytes", n, want)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
-		return nil, fmt.Errorf("rewind temp: %v", err)
+		return nil, false, fmt.Errorf("rewind temp: %v", err)
 	}
 
 	log.Printf("[%s] downloaded %d bytes in %s", logPrefix, n, time.Since(fetchStart))
-	return f, nil
+	return f, false, nil
 }
 
 // sniffDemoStream inspects the first 8 bytes to decide whether the
