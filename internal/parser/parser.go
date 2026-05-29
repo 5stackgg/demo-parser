@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 
 	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
 )
@@ -110,6 +111,7 @@ func (s *state) registerHandlers() {
 	s.parser.RegisterEventHandler(s.onPlayerInfo)
 	s.parser.RegisterEventHandler(s.onPlayerConnect)
 	s.parser.RegisterEventHandler(s.onPlayerNameChange)
+	s.parser.RegisterEventHandler(s.onRankUpdate)
 
 	s.parser.RegisterEventHandler(s.onMatchStart)
 	s.parser.RegisterEventHandler(s.onRoundStart)
@@ -196,6 +198,8 @@ func (s *state) finalize() {
 		s.recordPlayerRank(p)
 	}
 
+	s.captureMatchMeta()
+
 	if len(s.playerNames) == 0 {
 		return
 	}
@@ -208,11 +212,45 @@ func (s *state) finalize() {
 	for _, sid := range ids {
 		rank := s.playerRanks[sid]
 		s.res.Players = append(s.res.Players, PlayerInfo{
-			SteamID:  sid,
-			Name:     s.playerNames[sid],
-			Rank:     rank.rank,
-			RankType: rank.rankType,
+			SteamID:      sid,
+			Name:         s.playerNames[sid],
+			Rank:         rank.rank,
+			RankType:     rank.rankType,
+			PreviousRank: rank.previousRank,
+			WinCount:     rank.winCount,
 		})
+	}
+}
+
+// captureMatchMeta records game-rule signals (overtime, max rounds, server)
+// for match-type classification and logs the per-player rank each demo carries.
+func (s *state) captureMatchMeta() {
+	cv := s.parser.GameState().Rules().ConVars()
+	if v, ok := cv["mp_maxrounds"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			s.res.MaxRounds = n
+		}
+	}
+	if v, ok := cv["mp_overtime_enable"]; ok {
+		s.res.OvertimeEnabled = v == "1" || v == "true"
+	}
+	if v, ok := cv["hostname"]; ok {
+		s.res.ServerName = v
+	}
+	s.res.PlayerCount = len(s.playerNames)
+
+	fmt.Fprintf(
+		os.Stderr,
+		"[match-meta] map=%s maxRounds=%d overtime=%t players=%d server=%q\n",
+		s.res.MapName, s.res.MaxRounds, s.res.OvertimeEnabled,
+		s.res.PlayerCount, s.res.ServerName,
+	)
+	for sid, r := range s.playerRanks {
+		fmt.Fprintf(
+			os.Stderr,
+			"[player-rank] steam_id=%s rank=%d rank_type=%d\n",
+			sid, r.rank, r.rankType,
+		)
 	}
 }
 

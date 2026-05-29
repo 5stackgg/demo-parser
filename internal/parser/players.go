@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
@@ -44,8 +46,11 @@ func (s *state) onPlayerNameChange(e events.PlayerNameChange) {
 }
 
 type playerRank struct {
-	rank     int
-	rankType int
+	rank         int
+	rankType     int
+	previousRank int
+	hasPrevious  bool
+	winCount     int
 }
 
 func (s *state) recordPlayerRank(p *common.Player) {
@@ -61,7 +66,41 @@ func (s *state) recordPlayerRank(p *common.Player) {
 	if rt <= 0 && r <= 0 {
 		return
 	}
-	s.playerRanks[sid] = playerRank{rank: r, rankType: rt}
+	pr := s.playerRanks[sid]
+	if rt > 0 {
+		pr.rankType = rt
+	}
+	// RankUpdate's RankNew is authoritative; only fall back to the scoreboard
+	// rank for players who never got an update event.
+	if r > 0 && !pr.hasPrevious {
+		pr.rank = r
+	}
+	s.playerRanks[sid] = pr
+}
+
+// onRankUpdate captures the rank change Valve emits at match end — the only
+// place RankOld (pre-match rank) is available, giving an exact per-match delta.
+func (s *state) onRankUpdate(e events.RankUpdate) {
+	sid := strconv.FormatUint(e.SteamID64(), 10)
+	if sid == "" || sid == "0" {
+		return
+	}
+	pr := s.playerRanks[sid]
+	pr.rank = e.RankNew
+	pr.previousRank = e.RankOld
+	pr.hasPrevious = true
+	pr.winCount = e.WinCount
+	if e.Player != nil {
+		if rt := e.Player.RankType(); rt > 0 {
+			pr.rankType = rt
+		}
+	}
+	s.playerRanks[sid] = pr
+	fmt.Fprintf(
+		os.Stderr,
+		"[rank-update] steam_id=%s old=%d new=%d change=%.2f type=%d wins=%d\n",
+		sid, e.RankOld, e.RankNew, e.RankChange, pr.rankType, e.WinCount,
+	)
 }
 
 func (s *state) recordPlayerName(p *common.Player) {

@@ -195,10 +195,12 @@ type EventGrenadeDetonate struct {
 }
 
 type PlayerInfo struct {
-	SteamID  string `json:"steam_id"`
-	Name     string `json:"name"`
-	Rank     int    `json:"rank,omitempty"`
-	RankType int    `json:"rank_type,omitempty"`
+	SteamID      string `json:"steam_id"`
+	Name         string `json:"name"`
+	Rank         int    `json:"rank,omitempty"`
+	RankType     int    `json:"rank_type,omitempty"`
+	PreviousRank int    `json:"previous_rank,omitempty"`
+	WinCount     int    `json:"win_count,omitempty"`
 }
 
 type Result struct {
@@ -206,10 +208,15 @@ type Result struct {
 	TickRate   float64      `json:"tick_rate"`
 	MapName    string       `json:"map_name"`
 	WorkshopID string       `json:"workshop_id,omitempty"`
-	RoundTicks []RoundTick  `json:"round_ticks"`
-	Kills      []EventKill  `json:"kills"`
-	Bombs      []EventBomb  `json:"bombs"`
-	Players    []PlayerInfo `json:"players,omitempty"`
+	// Game-rule signals used by the importer to classify the match type.
+	ServerName      string `json:"server_name,omitempty"`
+	MaxRounds       int    `json:"max_rounds,omitempty"`
+	OvertimeEnabled bool   `json:"overtime_enabled,omitempty"`
+	PlayerCount     int    `json:"player_count,omitempty"`
+	RoundTicks      []RoundTick  `json:"round_ticks"`
+	Kills           []EventKill  `json:"kills"`
+	Bombs           []EventBomb  `json:"bombs"`
+	Players         []PlayerInfo `json:"players,omitempty"`
 
 	ShotsFired         []EventShotFired       `json:"shots_fired,omitempty"`
 	Damages            []EventDamage          `json:"damages,omitempty"`
