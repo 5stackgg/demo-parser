@@ -28,13 +28,17 @@ func (s *state) onGrenadeProjectileThrow(e events.GrenadeProjectileThrow) {
 		pos.Y = tp.Y
 		pos.Z = tp.Z
 	}
+	s.grenadeSeq++
+	gid := s.grenadeSeq
+
 	ev := EventGrenadeThrow{
-		Tick:    s.parser.GameState().IngameTick(),
-		Round:   s.currentRound,
-		Type:    gtype,
-		OriginX: float32(pos.X),
-		OriginY: float32(pos.Y),
-		OriginZ: float32(pos.Z),
+		Tick:      s.parser.GameState().IngameTick(),
+		Round:     s.currentRound,
+		GrenadeID: gid,
+		Type:      gtype,
+		OriginX:   float32(pos.X),
+		OriginY:   float32(pos.Y),
+		OriginZ:   float32(pos.Z),
 	}
 	if thrower != nil {
 		ev.ThrowerSteamID = steamIDStr(thrower)
@@ -45,6 +49,7 @@ func (s *state) onGrenadeProjectileThrow(e events.GrenadeProjectileThrow) {
 	if e.Projectile.Entity != nil {
 		entID := e.Projectile.Entity.ID()
 		s.grenadePos[entID] = grenadeProjectile{
+			id:      gid,
 			x:       float32(pos.X),
 			y:       float32(pos.Y),
 			z:       float32(pos.Z),
@@ -68,6 +73,7 @@ func (s *state) onGrenadeProjectileDestroy(e events.GrenadeProjectileDestroy) {
 		g.x = float32(pos.X)
 		g.y = float32(pos.Y)
 		g.z = float32(pos.Z)
+		g.destroyTick = s.parser.GameState().IngameTick()
 		s.grenadePos[entID] = g
 	}
 }
@@ -115,6 +121,11 @@ func (s *state) onFrameDoneGrenades() {
 // emitDetonate is the shared handler for the four detonation events.
 // Prefers the tracked projectile position over the event's Position
 // since demoinfocs reports stale/(0,0,0) Position on some CS2 demos.
+const (
+	maxDetonateLagTicks = 64
+	maxMatchDistSq      = float32(250 * 250)
+)
+
 func (s *state) emitDetonate(base events.GrenadeEvent, typeOverride string) {
 	gtype := typeOverride
 	if gtype == "" {
@@ -124,22 +135,20 @@ func (s *state) emitDetonate(base events.GrenadeEvent, typeOverride string) {
 		return
 	}
 
+	tick := s.parser.GameState().IngameTick()
 	x := float32(base.Position.X)
 	y := float32(base.Position.Y)
 	z := float32(base.Position.Z)
-	if g, ok := s.grenadePos[base.GrenadeEntityID]; ok {
-		// Tracked projectile position is the source of truth; only use
-		// event Position if it's plausibly non-stale (non-zero AND
-		// within a sane range of the tracked one).
-		if g.x != 0 || g.y != 0 {
-			x = g.x
-			y = g.y
-			z = g.z
-		}
+
+	key, proj, ok := s.matchProjectile(base.GrenadeEntityID, gtype, x, y, tick)
+	if ok && (proj.x != 0 || proj.y != 0) {
+		x = proj.x
+		y = proj.y
+		z = proj.z
 	}
 
 	ev := EventGrenadeDetonate{
-		Tick:  s.parser.GameState().IngameTick(),
+		Tick:  tick,
 		Round: s.currentRound,
 		Type:  gtype,
 		X:     x,
@@ -148,10 +157,44 @@ func (s *state) emitDetonate(base events.GrenadeEvent, typeOverride string) {
 	}
 	if base.Thrower != nil {
 		ev.ThrowerSteamID = steamIDStr(base.Thrower)
-	} else if g, ok := s.grenadePos[base.GrenadeEntityID]; ok && g.thrower != "" {
-		ev.ThrowerSteamID = g.thrower
+	} else if ok && proj.thrower != "" {
+		ev.ThrowerSteamID = proj.thrower
+	}
+	if ok {
+		ev.GrenadeID = proj.id
+		proj.matched = true
+		s.grenadePos[key] = proj
 	}
 	s.res.GrenadeDetonations = append(s.res.GrenadeDetonations, ev)
+}
+
+func (s *state) matchProjectile(entID int, gtype string, x, y float32, tick int) (int, grenadeProjectile, bool) {
+	if g, ok := s.grenadePos[entID]; ok && !g.matched && g.gtype == gtype {
+		return entID, g, true
+	}
+	bestKey := -1
+	var best grenadeProjectile
+	bestDist := float32(-1)
+	for k, g := range s.grenadePos {
+		if g.matched || g.gtype != gtype {
+			continue
+		}
+		if g.destroyTick == 0 || g.destroyTick > tick || tick-g.destroyTick > maxDetonateLagTicks {
+			continue
+		}
+		dx := g.x - x
+		dy := g.y - y
+		dist := dx*dx + dy*dy
+		if bestDist < 0 || dist < bestDist {
+			bestDist = dist
+			bestKey = k
+			best = g
+		}
+	}
+	if bestKey >= 0 && bestDist <= maxMatchDistSq {
+		return bestKey, best, true
+	}
+	return -1, grenadeProjectile{}, false
 }
 
 func (s *state) onHeExplode(e events.HeExplode) {

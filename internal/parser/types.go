@@ -65,14 +65,14 @@ type EventKitDrop struct {
 }
 
 type EventShotFired struct {
-	Tick            int      `json:"tick"`
-	Round           int      `json:"round,omitempty"`
-	AttackerSteamID string   `json:"attacker,omitempty"`
-	AttackerTeam    string   `json:"attacker_team,omitempty"`
-	Weapon          string   `json:"weapon,omitempty"`
-	IsRifle         bool     `json:"is_rifle,omitempty"`
-	IsCrouched      bool     `json:"is_crouched,omitempty"`
-	EnemySpotted    bool     `json:"enemy_spotted,omitempty"`
+	Tick            int    `json:"tick"`
+	Round           int    `json:"round,omitempty"`
+	AttackerSteamID string `json:"attacker,omitempty"`
+	AttackerTeam    string `json:"attacker_team,omitempty"`
+	Weapon          string `json:"weapon,omitempty"`
+	IsRifle         bool   `json:"is_rifle,omitempty"`
+	IsCrouched      bool   `json:"is_crouched,omitempty"`
+	EnemySpotted    bool   `json:"enemy_spotted,omitempty"`
 	// IsSpray: this shot followed the same attacker's previous shot
 	// within 250ms — i.e. trigger held. First shot of a burst is false.
 	IsSpray    bool     `json:"is_spray,omitempty"`
@@ -176,6 +176,7 @@ type EventSpotted struct {
 type EventGrenadeThrow struct {
 	Tick           int     `json:"tick"`
 	Round          int     `json:"round,omitempty"`
+	GrenadeID      int     `json:"gid,omitempty"`
 	ThrowerSteamID string  `json:"thrower,omitempty"`
 	ThrowerTeam    string  `json:"thrower_team,omitempty"`
 	Type           string  `json:"type"`
@@ -187,6 +188,7 @@ type EventGrenadeThrow struct {
 type EventGrenadeDetonate struct {
 	Tick           int     `json:"tick"`
 	Round          int     `json:"round,omitempty"`
+	GrenadeID      int     `json:"gid,omitempty"`
 	ThrowerSteamID string  `json:"thrower,omitempty"`
 	Type           string  `json:"type"`
 	X              float32 `json:"x,omitempty"`
@@ -204,15 +206,15 @@ type PlayerInfo struct {
 }
 
 type Result struct {
-	TotalTicks int          `json:"total_ticks"`
-	TickRate   float64      `json:"tick_rate"`
-	MapName    string       `json:"map_name"`
-	WorkshopID string       `json:"workshop_id,omitempty"`
+	TotalTicks int     `json:"total_ticks"`
+	TickRate   float64 `json:"tick_rate"`
+	MapName    string  `json:"map_name"`
+	WorkshopID string  `json:"workshop_id,omitempty"`
 	// Game-rule signals used by the importer to classify the match type.
-	ServerName      string `json:"server_name,omitempty"`
-	MaxRounds       int    `json:"max_rounds,omitempty"`
-	OvertimeEnabled bool   `json:"overtime_enabled,omitempty"`
-	PlayerCount     int    `json:"player_count,omitempty"`
+	ServerName      string       `json:"server_name,omitempty"`
+	MaxRounds       int          `json:"max_rounds,omitempty"`
+	OvertimeEnabled bool         `json:"overtime_enabled,omitempty"`
+	PlayerCount     int          `json:"player_count,omitempty"`
 	RoundTicks      []RoundTick  `json:"round_ticks"`
 	Kills           []EventKill  `json:"kills"`
 	Bombs           []EventBomb  `json:"bombs"`

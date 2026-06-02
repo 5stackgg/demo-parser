@@ -64,13 +64,18 @@ type state struct {
 	// frame and consulting it on the detonate event gives reliable
 	// coords.
 	grenadePos map[int]grenadeProjectile
+
+	grenadeSeq int
 }
 
 type grenadeProjectile struct {
-	x, y, z float32
-	gtype   string
-	thrower string
-	team    string
+	id          int
+	x, y, z     float32
+	gtype       string
+	thrower     string
+	team        string
+	destroyTick int
+	matched     bool
 }
 
 // Parse reads a CS2 demo from r and returns the playback metadata,
