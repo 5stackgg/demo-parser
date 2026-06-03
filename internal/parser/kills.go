@@ -31,7 +31,7 @@ func (s *state) onKill(e events.Kill) {
 		k.VictimTeam = teamCode(e.Victim.Team)
 	}
 	if e.Weapon != nil {
-		k.Weapon = e.Weapon.String()
+		k.Weapon = weaponCanonical(e.Weapon)
 	}
 	s.res.Kills = append(s.res.Kills, k)
 

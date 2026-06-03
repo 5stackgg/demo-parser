@@ -165,7 +165,7 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		Round:           s.currentRound,
 		AttackerSteamID: attackerID,
 		AttackerTeam:    teamCode(e.Shooter.Team),
-		Weapon:          e.Weapon.String(),
+		Weapon:          weaponCanonical(e.Weapon),
 		IsRifle:         isRifle,
 		IsCrouched:      e.Shooter.IsDucking(),
 		EnemySpotted:    enemySpotted,

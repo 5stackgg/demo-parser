@@ -40,7 +40,7 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 		FromSpray:       fromSpray,
 	}
 	if e.Weapon != nil {
-		d.Weapon = e.Weapon.String()
+		d.Weapon = weaponCanonical(e.Weapon)
 	}
 	// Consume the matching visibility entry: attacker saw victim at
 	// some earlier tick and this is the first damage in that

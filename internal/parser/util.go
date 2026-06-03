@@ -4,6 +4,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/golang/geo/r3"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
@@ -59,6 +60,125 @@ func bombSiteCode(s events.Bombsite) string {
 	default:
 		return ""
 	}
+}
+
+// weaponName maps a CS2 equipment type to its canonical internal weapon
+// name — the engine classname without the `weapon_` prefix (e.g. EqM4A4 ->
+// "m4a1", EqM4A1 -> "m4a1_silencer", EqP2000 -> "hkp2000"). demoinfocs'
+// String() returns display names ("M4A4", "M4A1-S", "Desert Eagle") that
+// don't line up with the names native 5Stack matches store or the equipment
+// icon set, which is what made imported matches show duplicate / missing
+// weapons. Emitting the canonical name keeps both paths consistent.
+func weaponName(t common.EquipmentType) string {
+	switch t {
+	// pistols
+	case common.EqP2000:
+		return "hkp2000"
+	case common.EqGlock:
+		return "glock"
+	case common.EqP250:
+		return "p250"
+	case common.EqDeagle:
+		return "deagle"
+	case common.EqFiveSeven:
+		return "fiveseven"
+	case common.EqDualBerettas:
+		return "elite"
+	case common.EqTec9:
+		return "tec9"
+	case common.EqCZ:
+		return "cz75a"
+	case common.EqUSP:
+		return "usp_silencer"
+	case common.EqRevolver:
+		return "revolver"
+	// smgs
+	case common.EqMP7:
+		return "mp7"
+	case common.EqMP9:
+		return "mp9"
+	case common.EqBizon:
+		return "bizon"
+	case common.EqMac10:
+		return "mac10"
+	case common.EqUMP:
+		return "ump45"
+	case common.EqP90:
+		return "p90"
+	case common.EqMP5:
+		return "mp5sd"
+	// heavy
+	case common.EqSawedOff:
+		return "sawedoff"
+	case common.EqNova:
+		return "nova"
+	case common.EqMag7:
+		return "mag7"
+	case common.EqXM1014:
+		return "xm1014"
+	case common.EqM249:
+		return "m249"
+	case common.EqNegev:
+		return "negev"
+	// rifles
+	case common.EqGalil:
+		return "galilar"
+	case common.EqFamas:
+		return "famas"
+	case common.EqAK47:
+		return "ak47"
+	case common.EqM4A4:
+		return "m4a1"
+	case common.EqM4A1:
+		return "m4a1_silencer"
+	case common.EqSSG08:
+		return "ssg08"
+	case common.EqSG556:
+		return "sg556"
+	case common.EqAUG:
+		return "aug"
+	case common.EqAWP:
+		return "awp"
+	case common.EqScar20:
+		return "scar20"
+	case common.EqG3SG1:
+		return "g3sg1"
+	// equipment / utility
+	case common.EqZeus:
+		return "taser"
+	case common.EqBomb:
+		return "c4"
+	case common.EqKnife:
+		return "knife"
+	case common.EqDecoy:
+		return "decoy"
+	case common.EqMolotov:
+		return "molotov"
+	case common.EqIncendiary:
+		return "inferno"
+	case common.EqFlash:
+		return "flashbang"
+	case common.EqSmoke:
+		return "smokegrenade"
+	case common.EqHE:
+		return "hegrenade"
+	default:
+		return ""
+	}
+}
+
+// weaponCanonical resolves an equipment instance to its canonical name,
+// falling back to a sanitised display name for anything outside the known
+// set so an unusual item is still stored as a stable lowercase token rather
+// than dropped.
+func weaponCanonical(e *common.Equipment) string {
+	if e == nil {
+		return ""
+	}
+	if name := weaponName(e.Type); name != "" {
+		return name
+	}
+	return strings.ToLower(strings.ReplaceAll(e.String(), " ", ""))
 }
 
 func grenadeTypeCode(t common.EquipmentType) string {
