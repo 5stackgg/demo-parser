@@ -26,9 +26,17 @@ func (s *state) onKill(e events.Kill) {
 	}
 	if e.Killer != nil {
 		k.KillerTeam = teamCode(e.Killer.Team)
+		kpos := e.Killer.Position()
+		k.AttackerX = f32ptr(kpos.X)
+		k.AttackerY = f32ptr(kpos.Y)
+		k.AttackerZ = f32ptr(kpos.Z)
 	}
 	if e.Victim != nil {
 		k.VictimTeam = teamCode(e.Victim.Team)
+		vpos := e.Victim.Position()
+		k.VictimX = f32ptr(vpos.X)
+		k.VictimY = f32ptr(vpos.Y)
+		k.VictimZ = f32ptr(vpos.Z)
 	}
 	if e.Weapon != nil {
 		k.Weapon = weaponCanonical(e.Weapon)

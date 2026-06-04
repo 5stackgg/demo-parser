@@ -224,3 +224,10 @@ func viewVector(yawDeg, pitchDeg float32) r3.Vector {
 		Z: -math.Sin(pitch),
 	}
 }
+
+// f32ptr returns a pointer to the float32 form of v. Used for optional
+// coordinate fields so they serialize only when actually captured.
+func f32ptr(v float64) *float32 {
+	f := float32(v)
+	return &f
+}

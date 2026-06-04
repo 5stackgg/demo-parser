@@ -12,6 +12,11 @@ type RoundTick struct {
 	EndTick       int    `json:"end_tick"`
 	Winner        string `json:"winner,omitempty"`
 	Reason        int    `json:"reason,omitempty"`
+	// Team money summed at round end (per side), mirroring the live
+	// game-server's GetTeamMoney capture. The importer maps these to
+	// lineup_1/lineup_2 by the side each lineup held that round.
+	CtMoney *int `json:"ct_money,omitempty"`
+	TMoney  *int `json:"t_money,omitempty"`
 }
 
 type EventKill struct {
@@ -26,6 +31,15 @@ type EventKill struct {
 	WallBang      bool   `json:"wallbang,omitempty"`
 	NoScope       bool   `json:"noscope,omitempty"`
 	ThroughSmoke  bool   `json:"smoke,omitempty"`
+	// World coordinates at the moment of the kill — killer's position and
+	// the victim's last-alive position. Lets the importer store kill/death
+	// locations without the heatmap having to download the demo blob.
+	AttackerX *float32 `json:"attacker_x,omitempty"`
+	AttackerY *float32 `json:"attacker_y,omitempty"`
+	AttackerZ *float32 `json:"attacker_z,omitempty"`
+	VictimX   *float32 `json:"victim_x,omitempty"`
+	VictimY   *float32 `json:"victim_y,omitempty"`
+	VictimZ   *float32 `json:"victim_z,omitempty"`
 }
 
 // EventBomb is a single timeline entry for a bomb interaction. Type

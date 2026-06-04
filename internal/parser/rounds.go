@@ -135,6 +135,24 @@ func (s *state) onRoundEnd(e events.RoundEnd) {
 	last := &s.res.RoundTicks[len(s.res.RoundTicks)-1]
 	last.Winner = teamCode(e.Winner)
 	last.Reason = int(e.Reason)
+
+	// Snapshot team money at round end (sum of each side's accounts) the
+	// same way the live game-server does, so external imports populate
+	// match_map_rounds.lineup_*_money for the economy chart + buy types.
+	var ctMoney, tMoney int
+	for _, p := range s.parser.GameState().Participants().Playing() {
+		if p == nil {
+			continue
+		}
+		switch p.Team {
+		case common.TeamCounterTerrorists:
+			ctMoney += p.Money()
+		case common.TeamTerrorists:
+			tMoney += p.Money()
+		}
+	}
+	last.CtMoney = &ctMoney
+	last.TMoney = &tMoney
 }
 
 func (s *state) onRoundEndOfficial(_ events.RoundEndOfficial) {
