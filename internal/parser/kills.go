@@ -19,6 +19,7 @@ func (s *state) onKill(e events.Kill) {
 		KillerSteamID: steamIDStr(e.Killer),
 		VictimSteamID: steamIDStr(e.Victim),
 		AssistSteamID: steamIDStr(e.Assister),
+		AssistFlash:   e.AssistedFlash,
 		Headshot:      e.IsHeadshot,
 		WallBang:      e.IsWallBang(),
 		NoScope:       e.NoScope,

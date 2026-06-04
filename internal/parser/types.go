@@ -24,6 +24,7 @@ type EventKill struct {
 	KillerSteamID string `json:"killer,omitempty"`
 	VictimSteamID string `json:"victim,omitempty"`
 	AssistSteamID string `json:"assist,omitempty"`
+	AssistFlash   bool   `json:"assist_flash,omitempty"`
 	KillerTeam    string `json:"killer_team,omitempty"`
 	VictimTeam    string `json:"victim_team,omitempty"`
 	Weapon        string `json:"weapon,omitempty"`
