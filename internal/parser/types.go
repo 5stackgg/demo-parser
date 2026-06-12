@@ -230,6 +230,8 @@ type Result struct {
 	MaxRounds       int          `json:"max_rounds,omitempty"`
 	OvertimeEnabled bool         `json:"overtime_enabled,omitempty"`
 	PlayerCount     int          `json:"player_count,omitempty"`
+	GameType        int          `json:"game_type,omitempty"`
+	GameMode        int          `json:"game_mode,omitempty"`
 	RoundTicks      []RoundTick  `json:"round_ticks"`
 	Kills           []EventKill  `json:"kills"`
 	Bombs           []EventBomb  `json:"bombs"`

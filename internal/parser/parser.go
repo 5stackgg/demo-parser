@@ -242,13 +242,23 @@ func (s *state) captureMatchMeta() {
 	if v, ok := cv["hostname"]; ok {
 		s.res.ServerName = v
 	}
+	if v, ok := cv["game_type"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			s.res.GameType = n
+		}
+	}
+	if v, ok := cv["game_mode"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			s.res.GameMode = n
+		}
+	}
 	s.res.PlayerCount = len(s.playerNames)
 
 	fmt.Fprintf(
 		os.Stderr,
-		"[match-meta] map=%s maxRounds=%d overtime=%t players=%d server=%q\n",
+		"[match-meta] map=%s maxRounds=%d overtime=%t players=%d gameType=%d gameMode=%d server=%q\n",
 		s.res.MapName, s.res.MaxRounds, s.res.OvertimeEnabled,
-		s.res.PlayerCount, s.res.ServerName,
+		s.res.PlayerCount, s.res.GameType, s.res.GameMode, s.res.ServerName,
 	)
 	for sid, r := range s.playerRanks {
 		fmt.Fprintf(
