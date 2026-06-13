@@ -48,6 +48,9 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			alive:    true,
 			tick:     curTick,
 		}
+		if hasSpeed && speed > 100 {
+			s.lastMoveTick[sid] = curTick
+		}
 	}
 	for sid, f := range s.frames {
 		if !seen[sid] && f.alive {
@@ -55,6 +58,8 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			s.frames[sid] = f
 		}
 	}
+
+	s.trackFOV()
 
 	// Snapshot live projectile positions so the detonate-event handlers
 	// can fall back to a reliable coordinate (demoinfocs returns stale
@@ -158,7 +163,7 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 			}
 		}
 	}
-	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray}
+	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray, enemySpotted: enemySpotted}
 
 	ev := EventShotFired{
 		Tick:            curTick,
@@ -172,11 +177,17 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		IsSpray:         isSpray,
 	}
 
+	if mt, ok := s.lastMoveTick[attackerID]; ok {
+		if rate := s.parser.TickRate(); rate > 0 && float64(curTick-mt)/rate <= 0.4 {
+			ev.WasMoving = true
+		}
+	}
+
 	if sf, ok := s.frames[ev.AttackerSteamID]; ok && sf.alive && sf.hasSpeed {
 		speed := sf.speed
 		ev.Speed = &speed
 		if maxSpd, ok := weaponMaxSpeed[e.Weapon.Type]; ok && maxSpd > 0 {
-			stopped := speed < 0.34*maxSpd
+			stopped := speed < 0.5*maxSpd
 			ev.WasStopped = &stopped
 		}
 	}

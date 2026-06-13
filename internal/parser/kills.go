@@ -38,6 +38,8 @@ func (s *state) onKill(e events.Kill) {
 		k.VictimX = f32ptr(vpos.X)
 		k.VictimY = f32ptr(vpos.Y)
 		k.VictimZ = f32ptr(vpos.Z)
+		util := grenadeValue(e.Victim)
+		k.VictimUtilityValue = &util
 	}
 	if e.Weapon != nil {
 		k.Weapon = weaponCanonical(e.Weapon)

@@ -35,12 +35,13 @@ type EventKill struct {
 	// World coordinates at the moment of the kill — killer's position and
 	// the victim's last-alive position. Lets the importer store kill/death
 	// locations without the heatmap having to download the demo blob.
-	AttackerX *float32 `json:"attacker_x,omitempty"`
-	AttackerY *float32 `json:"attacker_y,omitempty"`
-	AttackerZ *float32 `json:"attacker_z,omitempty"`
-	VictimX   *float32 `json:"victim_x,omitempty"`
-	VictimY   *float32 `json:"victim_y,omitempty"`
-	VictimZ   *float32 `json:"victim_z,omitempty"`
+	AttackerX          *float32 `json:"attacker_x,omitempty"`
+	AttackerY          *float32 `json:"attacker_y,omitempty"`
+	AttackerZ          *float32 `json:"attacker_z,omitempty"`
+	VictimX            *float32 `json:"victim_x,omitempty"`
+	VictimY            *float32 `json:"victim_y,omitempty"`
+	VictimZ            *float32 `json:"victim_z,omitempty"`
+	VictimUtilityValue *int     `json:"victim_utility_value,omitempty"`
 }
 
 // EventBomb is a single timeline entry for a bomb interaction. Type
@@ -93,6 +94,7 @@ type EventShotFired struct {
 	IsSpray    bool     `json:"is_spray,omitempty"`
 	Speed      *float32 `json:"speed,omitempty"`
 	WasStopped *bool    `json:"was_stopped,omitempty"`
+	WasMoving  bool     `json:"was_moving,omitempty"`
 	// AmmoInMagazine = rounds remaining in the magazine BEFORE this
 	// shot was fired. Consumer derives "wasted magazine" by detecting
 	// upward jumps between consecutive shots in the same round —
@@ -211,6 +213,18 @@ type EventGrenadeDetonate struct {
 	Z              float32 `json:"z,omitempty"`
 }
 
+type PlayerTrade struct {
+	SteamID                  string `json:"steam_id"`
+	TradeKillOpportunities   int    `json:"trade_kill_opportunities"`
+	TradeKillAttempts        int    `json:"trade_kill_attempts"`
+	TradeKillSuccesses       int    `json:"trade_kill_successes"`
+	TradedDeathOpportunities int    `json:"traded_death_opportunities"`
+	TradedDeathAttempts      int    `json:"traded_death_attempts"`
+	TradedDeathSuccesses     int    `json:"traded_death_successes"`
+	UtilOnDeathSum           int    `json:"util_on_death_sum"`
+	Deaths                   int    `json:"deaths"`
+}
+
 type PlayerInfo struct {
 	SteamID      string `json:"steam_id"`
 	Name         string `json:"name"`
@@ -246,6 +260,7 @@ type Result struct {
 	RoundInventory     []EventRoundInventory  `json:"round_inventory,omitempty"`
 	Positions          []EventPosition        `json:"positions,omitempty"`
 	KitDrops           []EventKitDrop         `json:"kit_drops,omitempty"`
+	PlayerTrades       []PlayerTrade          `json:"player_trades,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.
@@ -263,15 +278,18 @@ type playerFrame struct {
 // spotter's eye angles at that instant. Consumed by the next matching
 // PlayerHurt event to compute spot-to-damage and crosshair delta.
 type visEntry struct {
-	tick  int
-	yaw   float32
-	pitch float32
+	tick   int
+	yaw    float32
+	pitch  float32
+	eye    r3.Vector
+	target r3.Vector
 }
 
 // shotMark records the attacker's last shot tick + whether that shot
 // was a spray shot. PlayerHurt attributes a damage to the most-recent
 // shot to inherit the spray flag.
 type shotMark struct {
-	tick    int
-	isSpray bool
+	tick         int
+	isSpray      bool
+	enemySpotted bool
 }

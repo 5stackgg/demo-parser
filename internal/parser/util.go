@@ -198,6 +198,31 @@ func grenadeTypeCode(t common.EquipmentType) string {
 	}
 }
 
+func grenadeValue(p *common.Player) int {
+	if p == nil {
+		return 0
+	}
+	total := 0
+	for _, w := range p.Weapons() {
+		if w == nil {
+			continue
+		}
+		switch w.Type {
+		case common.EqFlash:
+			total += 200
+		case common.EqSmoke:
+			total += 300
+		case common.EqHE:
+			total += 300
+		case common.EqMolotov, common.EqIncendiary:
+			total += 400
+		case common.EqDecoy:
+			total += 50
+		}
+	}
+	return total
+}
+
 func angleBetweenDeg(a, b r3.Vector) float32 {
 	la := math.Sqrt(a.X*a.X + a.Y*a.Y + a.Z*a.Z)
 	lb := math.Sqrt(b.X*b.X + b.Y*b.Y + b.Z*b.Z)

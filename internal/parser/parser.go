@@ -47,6 +47,13 @@ type state struct {
 	// and inherit the spray flag onto damages.
 	lastShot map[string]shotMark
 
+	victimHealth map[string]int
+
+	lastMoveTick map[string]int
+
+	fovEntryWide  map[string]map[string]visEntry
+	fovEntryTight map[string]map[string]visEntry
+
 	// steam_id → display name. Flattened to res.Players at the end.
 	playerNames map[string]string
 
@@ -89,14 +96,18 @@ type grenadeProjectile struct {
 // events collected before the abort.
 func Parse(r io.Reader) (*Result, error) {
 	s := &state{
-		parser:      dem.NewParser(r),
-		res:         &Result{},
-		visStart:    map[string]map[string]visEntry{},
-		frames:      map[string]playerFrame{},
-		lastShot:    map[string]shotMark{},
-		playerNames: map[string]string{},
-		playerRanks: map[string]playerRank{},
-		grenadePos:  map[int]grenadeProjectile{},
+		parser:        dem.NewParser(r),
+		res:           &Result{},
+		visStart:      map[string]map[string]visEntry{},
+		frames:        map[string]playerFrame{},
+		lastShot:      map[string]shotMark{},
+		victimHealth:  map[string]int{},
+		lastMoveTick:  map[string]int{},
+		fovEntryWide:  map[string]map[string]visEntry{},
+		fovEntryTight: map[string]map[string]visEntry{},
+		playerNames:   map[string]string{},
+		playerRanks:   map[string]playerRank{},
+		grenadePos:    map[int]grenadeProjectile{},
 	}
 	defer s.parser.Close()
 
@@ -204,6 +215,8 @@ func (s *state) finalize() {
 	}
 
 	s.captureMatchMeta()
+
+	s.computeTrades()
 
 	if len(s.playerNames) == 0 {
 		return

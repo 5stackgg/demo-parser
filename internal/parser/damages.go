@@ -1,6 +1,9 @@
 package parser
 
-import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+import (
+	"github.com/golang/geo/r3"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+)
 
 // onPlayerHurt records one row per damage instance. Skips self-damage
 // and null attackers (world / falling). Engagement metrics come from
@@ -9,18 +12,34 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 	if !s.matchStarted || s.currentRound == 0 {
 		return
 	}
-	if e.Attacker == nil || e.Player == nil || e.Attacker == e.Player {
+	if e.Player == nil {
+		return
+	}
+	victimID := steamIDStr(e.Player)
+	before, ok := s.victimHealth[victimID]
+	if !ok {
+		before = 100
+	}
+	damage := e.HealthDamageTaken
+	if damage > before {
+		damage = before
+	}
+	if damage < 0 {
+		damage = 0
+	}
+	s.victimHealth[victimID] = e.Health
+
+	if e.Attacker == nil || e.Attacker == e.Player {
 		return
 	}
 	attackerID := steamIDStr(e.Attacker)
-	victimID := steamIDStr(e.Player)
 	tick := s.parser.GameState().IngameTick()
 	// Attribute this damage to the attacker's most-recent shot if it
 	// fired within 250ms; inherit the spray flag.
 	fromSpray := false
 	if rate := s.parser.TickRate(); rate > 0 {
 		if prev, ok := s.lastShot[attackerID]; ok {
-			if float64(tick-prev.tick)/rate < 0.25 && prev.isSpray {
+			if float64(tick-prev.tick)/rate < 0.25 && prev.isSpray && prev.enemySpotted {
 				fromSpray = true
 			}
 		}
@@ -32,8 +51,8 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 		VictimSteamID:   victimID,
 		AttackerTeam:    teamCode(e.Attacker.Team),
 		VictimTeam:      teamCode(e.Player.Team),
-		Damage:          e.HealthDamage,
-		DamageArmor:     e.ArmorDamage,
+		Damage:          damage,
+		DamageArmor:     e.ArmorDamageTaken,
 		Hitgroup:        int(e.HitGroup),
 		Health:          e.Health,
 		HitOnSpotted:    e.Player.IsSpottedBy(e.Attacker),
@@ -49,18 +68,22 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 		if entry, ok2 := vis[attackerID]; ok2 {
 			if rate := s.parser.TickRate(); rate > 0 {
 				secs := float64(tick-entry.tick) / rate
-				// Cap at 3s — beyond that this is a hold-angle /
-				// trigger-discipline play, not a reaction engagement.
-				if secs >= 0 && secs <= 3 {
+				// Floor at 0.2s — faster than human reaction, so the
+				// attacker was pre-aimed, not reacting. Cap at 3s —
+				// beyond that this is a hold-angle / trigger-discipline
+				// play, not a reaction engagement.
+				if secs >= 0.2 && secs <= 3 {
 					d.SpotToDamageS = &secs
 				}
 			}
 			spotView := viewVector(entry.yaw, entry.pitch)
-			nowView := viewVector(e.Attacker.ViewDirectionX(), e.Attacker.ViewDirectionY())
-			angle := angleBetweenDeg(spotView, nowView)
-			// Cap at 45° — wider is wraparound noise or a flick
-			// through a wall, not crosshair placement.
-			if angle >= 0 && angle <= 45 {
+			toTarget := r3.Vector{
+				X: entry.target.X - entry.eye.X,
+				Y: entry.target.Y - entry.eye.Y,
+				Z: entry.target.Z - entry.eye.Z,
+			}
+			angle := angleBetweenDeg(spotView, toTarget)
+			if angle >= 0 && angle <= 90 {
 				d.CrosshairDeltaDeg = &angle
 			}
 			delete(vis, attackerID)
@@ -100,11 +123,24 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 			next[pid] = existing
 			continue
 		}
-		next[pid] = visEntry{
-			tick:  tick,
-			yaw:   p.ViewDirectionX(),
-			pitch: p.ViewDirectionY(),
+		eye, _ := p.PositionEyes()
+		target, _ := e.Spotted.PositionEyes()
+		entry := visEntry{
+			tick:   tick,
+			yaw:    p.ViewDirectionX(),
+			pitch:  p.ViewDirectionY(),
+			eye:    eye,
+			target: target,
 		}
+		rate := s.parser.TickRate()
+		recent := func(fe visEntry) bool { return rate <= 0 || float64(tick-fe.tick)/rate <= 1.5 }
+		if w, ok := s.fovEntryWide[spottedID][pid]; ok && recent(w) {
+			entry = w
+			if t, ok2 := s.fovEntryTight[spottedID][pid]; ok2 && recent(t) {
+				entry.yaw, entry.pitch, entry.eye, entry.target = t.yaw, t.pitch, t.eye, t.target
+			}
+		}
+		next[pid] = entry
 		s.res.Spotted = append(s.res.Spotted, EventSpotted{
 			Tick:           tick,
 			Round:          s.currentRound,
