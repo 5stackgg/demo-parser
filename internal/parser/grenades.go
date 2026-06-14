@@ -115,6 +115,13 @@ func (s *state) onFrameDoneGrenades() {
 		g.y = float32(pos.Y)
 		g.z = float32(pos.Z)
 		s.grenadePos[entID] = g
+		if g.id > 0 {
+			tick := s.parser.GameState().IngameTick()
+			pp := s.grenadePaths[g.id]
+			if len(pp) == 0 || tick-pp[len(pp)-1].Tick >= 2 {
+				s.grenadePaths[g.id] = append(pp, GrenadePathPt{Tick: tick, X: g.x, Y: g.y, Z: g.z})
+			}
+		}
 	}
 }
 

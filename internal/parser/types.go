@@ -133,6 +133,12 @@ type EventPosition struct {
 	// replay overlay show a small kit indicator so viewers can see
 	// which CT will get the 5s defuse window.
 	HasDefuser bool `json:"has_defuser,omitempty"`
+	// ActiveWeapon is the canonical name of the weapon the player has
+	// equipped at this sample tick (e.g. "ak47", "knife", "hegrenade").
+	// Lets the 2D replay show what's actually out — rifle, pistol,
+	// knife, or a grenade mid-throw — rather than the static loadout.
+	// Empty when unarmed (dead / nothing equipped).
+	ActiveWeapon string `json:"active_weapon,omitempty"`
 }
 
 type EventFlash struct {
@@ -213,6 +219,18 @@ type EventGrenadeDetonate struct {
 	Z              float32 `json:"z,omitempty"`
 }
 
+type GrenadePathPt struct {
+	Tick int     `json:"t"`
+	X    float32 `json:"x"`
+	Y    float32 `json:"y"`
+	Z    float32 `json:"z"`
+}
+
+type GrenadeTrajectory struct {
+	GrenadeID int             `json:"gid"`
+	Points    []GrenadePathPt `json:"pts"`
+}
+
 type PlayerTrade struct {
 	SteamID                  string `json:"steam_id"`
 	TradeKillOpportunities   int    `json:"trade_kill_opportunities"`
@@ -251,16 +269,17 @@ type Result struct {
 	Bombs           []EventBomb  `json:"bombs"`
 	Players         []PlayerInfo `json:"players,omitempty"`
 
-	ShotsFired         []EventShotFired       `json:"shots_fired,omitempty"`
-	Damages            []EventDamage          `json:"damages,omitempty"`
-	Spotted            []EventSpotted         `json:"spotted,omitempty"`
-	GrenadeThrows      []EventGrenadeThrow    `json:"grenade_throws,omitempty"`
-	GrenadeDetonations []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
-	Flashes            []EventFlash           `json:"flashes,omitempty"`
-	RoundInventory     []EventRoundInventory  `json:"round_inventory,omitempty"`
-	Positions          []EventPosition        `json:"positions,omitempty"`
-	KitDrops           []EventKitDrop         `json:"kit_drops,omitempty"`
-	PlayerTrades       []PlayerTrade          `json:"player_trades,omitempty"`
+	ShotsFired          []EventShotFired       `json:"shots_fired,omitempty"`
+	Damages             []EventDamage          `json:"damages,omitempty"`
+	Spotted             []EventSpotted         `json:"spotted,omitempty"`
+	GrenadeThrows       []EventGrenadeThrow    `json:"grenade_throws,omitempty"`
+	GrenadeDetonations  []EventGrenadeDetonate `json:"grenade_detonations,omitempty"`
+	Flashes             []EventFlash           `json:"flashes,omitempty"`
+	RoundInventory      []EventRoundInventory  `json:"round_inventory,omitempty"`
+	Positions           []EventPosition        `json:"positions,omitempty"`
+	KitDrops            []EventKitDrop         `json:"kit_drops,omitempty"`
+	PlayerTrades        []PlayerTrade          `json:"player_trades,omitempty"`
+	GrenadeTrajectories []GrenadeTrajectory    `json:"grenade_trajectories,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.

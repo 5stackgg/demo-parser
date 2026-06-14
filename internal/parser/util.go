@@ -181,6 +181,16 @@ func weaponCanonical(e *common.Equipment) string {
 	return strings.ToLower(strings.ReplaceAll(e.String(), " ", ""))
 }
 
+// activeWeaponName returns the canonical name of the player's currently
+// equipped weapon (rifle, pistol, knife, grenade, …), or "" if unarmed.
+// Same naming as kills/shots so the web icon map resolves it directly.
+func activeWeaponName(p *common.Player) string {
+	if p == nil {
+		return ""
+	}
+	return weaponCanonical(p.ActiveWeapon())
+}
+
 func grenadeTypeCode(t common.EquipmentType) string {
 	switch t {
 	case common.EqFlash:

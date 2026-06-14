@@ -73,6 +73,8 @@ type state struct {
 	grenadePos map[int]grenadeProjectile
 
 	grenadeSeq int
+
+	grenadePaths map[int][]GrenadePathPt
 }
 
 type grenadeProjectile struct {
@@ -108,6 +110,7 @@ func Parse(r io.Reader) (*Result, error) {
 		playerNames:   map[string]string{},
 		playerRanks:   map[string]playerRank{},
 		grenadePos:    map[int]grenadeProjectile{},
+		grenadePaths:  map[int][]GrenadePathPt{},
 	}
 	defer s.parser.Close()
 
@@ -217,6 +220,15 @@ func (s *state) finalize() {
 	s.captureMatchMeta()
 
 	s.computeTrades()
+
+	gids := make([]int, 0, len(s.grenadePaths))
+	for gid := range s.grenadePaths {
+		gids = append(gids, gid)
+	}
+	sort.Ints(gids)
+	for _, gid := range gids {
+		s.res.GrenadeTrajectories = append(s.res.GrenadeTrajectories, GrenadeTrajectory{GrenadeID: gid, Points: s.grenadePaths[gid]})
+	}
 
 	if len(s.playerNames) == 0 {
 		return

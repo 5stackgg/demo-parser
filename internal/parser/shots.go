@@ -116,6 +116,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			HasHelmet:       p.HasHelmet(),
 			HasBomb:         carrierSID != "" && sid == carrierSID,
 			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
+			ActiveWeapon:    activeWeaponName(p),
 		})
 	}
 }
