@@ -264,7 +264,7 @@ func (s *state) captureMatchMeta() {
 	if v, ok := cv["mp_overtime_enable"]; ok {
 		s.res.OvertimeEnabled = v == "1" || v == "true"
 	}
-	if v, ok := cv["hostname"]; ok {
+	if v, ok := cv["hostname"]; ok && v != "" && s.res.ServerName == "" {
 		s.res.ServerName = v
 	}
 	if v, ok := cv["game_type"]; ok {
