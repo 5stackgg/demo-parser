@@ -11,6 +11,9 @@ import (
 )
 
 func (s *state) onServerInfo(m *msg.CSVCMsg_ServerInfo) {
+	if host := m.GetHostName(); host != "" {
+		s.res.ServerName = host
+	}
 	name := m.GetMapName()
 	if name == "" {
 		return
