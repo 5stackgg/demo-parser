@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/bzip2"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -185,11 +186,12 @@ func downloadDemoOnce(demoURL, logPrefix string) (*os.File, bool, error) {
 }
 
 // sniffDemoStream inspects the first 8 bytes to decide whether the
-// body is bzip2-compressed, a raw CS:GO/CS2 demo, or something else
-// entirely (an HTML error page from Valve's CDN when a demo has been
-// tombstoned). For raw demos we accept either HL2DEMO (legacy) or
-// PBDEMS2 (CS2 source 2 protobuf). Anything else returns an error
-// with the magic bytes so the caller can see what was actually served.
+// body is bzip2-compressed (Valve), gzip-compressed (FACEIT), a raw
+// CS:GO/CS2 demo, or something else entirely (an HTML error page from
+// a CDN when a demo has been tombstoned). For raw demos we accept
+// either HL2DEMO (legacy) or PBDEMS2 (CS2 source 2 protobuf). Anything
+// else returns an error with the magic bytes so the caller can see
+// what was actually served.
 func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
 	br := bufio.NewReader(body)
 	magic, err := br.Peek(8)
@@ -201,6 +203,13 @@ func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
 	}
 	if bytes.HasPrefix(magic, []byte("BZh")) {
 		return bzip2.NewReader(br), nil
+	}
+	if bytes.HasPrefix(magic, []byte{0x1f, 0x8b}) {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		return gz, nil
 	}
 	if bytes.HasPrefix(magic, []byte("HL2DEMO")) ||
 		bytes.HasPrefix(magic, []byte("PBDEMS2")) {
