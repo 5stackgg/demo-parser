@@ -33,6 +33,23 @@ var weaponMaxSpeed = map[common.EquipmentType]float32{
 	common.EqG3SG1:  215,
 }
 
+// weaponClass buckets a canonical weapon name into the aim-relevant class
+// used for per-weapon accuracy (rifle / pistol / sniper). SMGs, shotguns and
+// LMGs return "" — they only count toward all-weapon accuracy.
+func weaponClass(name string) string {
+	switch name {
+	case "ak47", "m4a1", "m4a1_silencer", "aug", "sg556", "galilar", "famas":
+		return "rifle"
+	case "awp", "ssg08", "scar20", "g3sg1":
+		return "sniper"
+	case "glock", "hkp2000", "usp_silencer", "p250", "deagle",
+		"fiveseven", "elite", "tec9", "cz75a", "revolver":
+		return "pistol"
+	default:
+		return ""
+	}
+}
+
 func teamCode(t common.Team) string {
 	switch t {
 	case common.TeamCounterTerrorists:

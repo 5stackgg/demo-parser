@@ -100,6 +100,44 @@ type EventShotFired struct {
 	// upward jumps between consecutive shots in the same round —
 	// any leftover ammo when the count resets was wasted on a reload.
 	AmmoInMagazine *int `json:"ammo_in_magazine,omitempty"`
+	// Exact firing geometry at the shot tick — eye (muzzle) origin and
+	// view angles. Lets the 3D replay draw a real tracer along the line
+	// the player actually fired, instead of guessing from the ~4Hz yaw.
+	Yaw   *float32 `json:"yaw,omitempty"`
+	Pitch *float32 `json:"pitch,omitempty"`
+	EyeX  *float32 `json:"eye_x,omitempty"`
+	EyeY  *float32 `json:"eye_y,omitempty"`
+	EyeZ  *float32 `json:"eye_z,omitempty"`
+	// Result is set only when this shot produced damage: "hit" or
+	// "headshot" (absent ⇒ miss). Correlated to the next matching
+	// PlayerHurt in the parser so the renderer can color the tracer.
+	Result string `json:"result,omitempty"`
+	// ImpactX/Y/Z is the victim's eye position when the shot connected,
+	// so the tracer can terminate on the target. Only set on hits.
+	ImpactX *float32 `json:"impact_x,omitempty"`
+	ImpactY *float32 `json:"impact_y,omitempty"`
+	ImpactZ *float32 `json:"impact_z,omitempty"`
+}
+
+// EventAimEngagement is one attacker's bid against one victim, opened
+// when the attacker first sees the victim and closed on the victim's
+// death, loss of the engagement window, or round end. It carries the
+// per-engagement aim signals the per-tick view angles make possible:
+// first-bullet accuracy and time-on-target (tracking).
+type EventAimEngagement struct {
+	AttackerSteamID string `json:"attacker,omitempty"`
+	Round           int    `json:"round,omitempty"`
+	// FirstShotFired: the attacker fired at least one shot at this victim
+	// during the engagement; FirstShotHit: that first shot dealt damage.
+	FirstShotFired bool `json:"first_shot_fired,omitempty"`
+	FirstShotHit   bool `json:"first_shot_hit,omitempty"`
+	// OnTargetFrames / TotalFrames: tracking — frames the view stayed
+	// within a tight cone of the live victim over the engagement window.
+	OnTargetFrames int `json:"on_target_frames,omitempty"`
+	TotalFrames    int `json:"total_frames,omitempty"`
+	// WeaponClass of the first engagement shot (rifle/pistol/sniper/"") —
+	// lets first-bullet accuracy be split by weapon class.
+	WeaponClass string `json:"weapon_class,omitempty"`
 }
 
 // EventPosition is a low-frequency (~4Hz) sample of a single player's
@@ -115,6 +153,9 @@ type EventPosition struct {
 	Y               float32 `json:"y"`
 	Z               float32 `json:"z"`
 	Yaw             float32 `json:"yaw,omitempty"`
+	// Pitch is the vertical view angle (positive looks down). Lets the
+	// 3D replay tilt the aim cue up/down rather than yaw-only.
+	Pitch float32 `json:"pitch,omitempty"`
 	// Current HP at sample time. Lets the replay viewer render a
 	// boltobserv-style "wounded back" arc on the player dot.
 	Health int `json:"health,omitempty"`
@@ -257,6 +298,11 @@ type Result struct {
 	TickRate   float64 `json:"tick_rate"`
 	MapName    string  `json:"map_name"`
 	WorkshopID string  `json:"workshop_id,omitempty"`
+	// GeometryValidated is true when a collision mesh was available for this
+	// map, so the LOS-gated spotted/engagement stats are validated rather
+	// than estimated. Emitted even when false (no omitempty) so consumers can
+	// distinguish "estimated" from a missing field.
+	GeometryValidated bool `json:"geometry_validated"`
 	// Game-rule signals used by the importer to classify the match type.
 	ServerName      string       `json:"server_name,omitempty"`
 	MaxRounds       int          `json:"max_rounds,omitempty"`
@@ -280,6 +326,7 @@ type Result struct {
 	KitDrops            []EventKitDrop         `json:"kit_drops,omitempty"`
 	PlayerTrades        []PlayerTrade          `json:"player_trades,omitempty"`
 	GrenadeTrajectories []GrenadeTrajectory    `json:"grenade_trajectories,omitempty"`
+	AimEngagements      []EventAimEngagement   `json:"aim_engagements,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.
@@ -291,6 +338,29 @@ type playerFrame struct {
 	team     common.Team
 	alive    bool
 	tick     int
+	// View angles + eye position at this frame. Used by engagement
+	// tracking (time-on-target) and to pick the nearest engaged victim
+	// for a shot.
+	yaw   float32
+	pitch float32
+	eye   r3.Vector
+}
+
+// engagement is the mutable in-flight state for one attacker→victim bid.
+// Opened on first sight, flushed to EventAimEngagement on close.
+type engagement struct {
+	attacker string
+	victim   string
+	round    int
+	spotTick int
+
+	firstShotFired bool
+	firstShotTick  int
+	firstShotHit   bool
+	weaponClass    string
+
+	onTargetFrames int
+	totalFrames    int
 }
 
 // visEntry records when a spotter gained sight of a player and the
@@ -311,4 +381,7 @@ type shotMark struct {
 	tick         int
 	isSpray      bool
 	enemySpotted bool
+	// idx is the position of this shot in Result.ShotsFired, so a later
+	// matching PlayerHurt can backfill the shot's hit/headshot result.
+	idx int
 }

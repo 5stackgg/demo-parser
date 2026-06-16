@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/5stackgg/demo-parser/internal/geometry"
+	"github.com/golang/geo/r3"
 	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
 )
 
@@ -53,6 +55,17 @@ type state struct {
 
 	fovEntryWide  map[string]map[string]visEntry
 	fovEntryTight map[string]map[string]visEntry
+
+	// [attacker][victim] → in-flight engagement. Opened on first sight,
+	// flushed to res.AimEngagements on the victim's death, timeout, or
+	// round end.
+	engagements map[string]map[string]*engagement
+
+	// Map collision mesh for line-of-sight validation, lazy-loaded once the
+	// map name is known. meshTried guards against re-loading; a nil mesh
+	// (unknown map / no .tri / disabled) means los() never filters.
+	mesh      *geometry.Mesh
+	meshTried bool
 
 	// steam_id → display name. Flattened to res.Players at the end.
 	playerNames map[string]string
@@ -107,6 +120,7 @@ func Parse(r io.Reader) (*Result, error) {
 		lastMoveTick:  map[string]int{},
 		fovEntryWide:  map[string]map[string]visEntry{},
 		fovEntryTight: map[string]map[string]visEntry{},
+		engagements:   map[string]map[string]*engagement{},
 		playerNames:   map[string]string{},
 		playerRanks:   map[string]playerRank{},
 		grenadePos:    map[int]grenadeProjectile{},
@@ -219,6 +233,15 @@ func (s *state) finalize() {
 
 	s.captureMatchMeta()
 
+	// Flush any engagement still open at the demo's end.
+	s.closeAllEngagements()
+
+	// Record whether map geometry was available, so consumers can flag the
+	// LOS-gated stats as validated vs estimated. Force a load attempt if the
+	// demo had no engagements to trigger lazy loading.
+	s.ensureMesh()
+	s.res.GeometryValidated = s.mesh != nil
+
 	s.computeTrades()
 
 	gids := make([]int, 0, len(s.grenadePaths))
@@ -292,6 +315,38 @@ func (s *state) captureMatchMeta() {
 			sid, r.rank, r.rankType,
 		)
 	}
+}
+
+// ensureMesh lazy-loads the map collision mesh once the map name is known,
+// memoizing the attempt (including a nil result). It's a no-op until MapName
+// is set, so early callers retry on the next call.
+func (s *state) ensureMesh() {
+	if s.meshTried || s.res.MapName == "" {
+		return
+	}
+	s.meshTried = true
+	mesh, err := geometry.Load(s.res.MapName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[geometry] mesh load failed for %s: %v\n", s.res.MapName, err)
+	}
+	s.mesh = mesh
+	if s.mesh != nil {
+		fmt.Fprintf(os.Stderr, "[geometry] loaded mesh for %s (%d triangles)\n", s.res.MapName, s.mesh.Triangles())
+	} else {
+		fmt.Fprintf(os.Stderr, "[geometry] no mesh for %s — sightline validation disabled\n", s.res.MapName)
+	}
+}
+
+// los reports whether two eye points have a clear line of sight through the
+// map geometry. The mesh is lazy-loaded on first use (after MapName is known);
+// when no mesh is available it returns true so sightline-gated stats fall back
+// to their unvalidated behaviour rather than dropping to zero.
+func (s *state) los(a, b r3.Vector) bool {
+	s.ensureMesh()
+	if s.mesh == nil {
+		return true
+	}
+	return !s.mesh.Occluded(a, b)
 }
 
 func (s *state) captureMaxTick() {

@@ -40,6 +40,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 				hasSpeed = true
 			}
 		}
+		eye, _ := p.PositionEyes()
 		s.frames[sid] = playerFrame{
 			pos:      pos,
 			speed:    speed,
@@ -47,6 +48,9 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			team:     p.Team,
 			alive:    true,
 			tick:     curTick,
+			yaw:      p.ViewDirectionX(),
+			pitch:    p.ViewDirectionY(),
+			eye:      eye,
 		}
 		if hasSpeed && speed > 100 {
 			s.lastMoveTick[sid] = curTick
@@ -60,6 +64,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	}
 
 	s.trackFOV()
+	s.trackEngagements()
 
 	// Snapshot live projectile positions so the detonate-event handlers
 	// can fall back to a reliable coordinate (demoinfocs returns stale
@@ -111,6 +116,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			Y:               float32(pos.Y),
 			Z:               float32(pos.Z),
 			Yaw:             p.ViewDirectionX(),
+			Pitch:           p.ViewDirectionY(),
 			Health:          p.Health(),
 			Armor:           p.Armor(),
 			HasHelmet:       p.HasHelmet(),
@@ -137,6 +143,12 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 
 	isRifle := e.Weapon.Class() == common.EqClassRifle
 
+	// Exact firing geometry at this tick — muzzle origin + view angles — for
+	// the 3D replay tracer and the LOS check.
+	eye, _ := e.Shooter.PositionEyes()
+	yaw := e.Shooter.ViewDirectionX()
+	pitch := e.Shooter.ViewDirectionY()
+
 	enemySpotted := false
 	for _, p := range s.parser.GameState().Participants().Playing() {
 		if p == nil || p == e.Shooter || !p.IsAlive() {
@@ -145,9 +157,14 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		if p.Team == e.Shooter.Team {
 			continue
 		}
+		// Require a geometry-confirmed sightline, not just the engine's
+		// spotted flag (which leaks through smoke / thin gaps).
 		if p.IsSpottedBy(e.Shooter) {
-			enemySpotted = true
-			break
+			enemyEye, _ := p.PositionEyes()
+			if s.los(eye, enemyEye) {
+				enemySpotted = true
+				break
+			}
 		}
 	}
 
@@ -159,12 +176,11 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 	isSpray := false
 	if rate := s.parser.TickRate(); rate > 0 {
 		if prev, ok := s.lastShot[attackerID]; ok {
-			if float64(curTick-prev.tick)/rate < 0.25 {
+			if float64(curTick-prev.tick)/rate < sprayWindowSecs {
 				isSpray = true
 			}
 		}
 	}
-	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray, enemySpotted: enemySpotted}
 
 	ev := EventShotFired{
 		Tick:            curTick,
@@ -176,6 +192,11 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		IsCrouched:      e.Shooter.IsDucking(),
 		EnemySpotted:    enemySpotted,
 		IsSpray:         isSpray,
+		Yaw:             f32ptr(float64(yaw)),
+		Pitch:           f32ptr(float64(pitch)),
+		EyeX:            f32ptr(eye.X),
+		EyeY:            f32ptr(eye.Y),
+		EyeZ:            f32ptr(eye.Z),
 	}
 
 	if mt, ok := s.lastMoveTick[attackerID]; ok {
@@ -208,4 +229,7 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 	}
 
 	s.res.ShotsFired = append(s.res.ShotsFired, ev)
+	idx := len(s.res.ShotsFired) - 1
+	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray, enemySpotted: enemySpotted, idx: idx}
+	s.recordEngagementShot(attackerID, eye, yaw, pitch, ev.Weapon)
 }

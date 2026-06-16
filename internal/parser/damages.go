@@ -37,10 +37,36 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 	// Attribute this damage to the attacker's most-recent shot if it
 	// fired within 250ms; inherit the spray flag.
 	fromSpray := false
+	headshot := int(e.HitGroup) == 1
 	if rate := s.parser.TickRate(); rate > 0 {
-		if prev, ok := s.lastShot[attackerID]; ok {
-			if float64(tick-prev.tick)/rate < 0.25 && prev.isSpray && prev.enemySpotted {
+		if prev, ok := s.lastShot[attackerID]; ok && float64(tick-prev.tick)/rate < sprayWindowSecs {
+			if prev.isSpray && prev.enemySpotted {
 				fromSpray = true
+			}
+			// Backfill the firing shot's outcome (for the 3D tracer color)
+			// and end-point. First damage wins; headshot beats body.
+			if prev.idx >= 0 && prev.idx < len(s.res.ShotsFired) {
+				sh := &s.res.ShotsFired[prev.idx]
+				if sh.Result == "" {
+					if headshot {
+						sh.Result = "headshot"
+					} else {
+						sh.Result = "hit"
+					}
+					veye, _ := e.Player.PositionEyes()
+					sh.ImpactX = f32ptr(veye.X)
+					sh.ImpactY = f32ptr(veye.Y)
+					sh.ImpactZ = f32ptr(veye.Z)
+				}
+			}
+			// Mark the engagement's first shot as a hit if this damage
+			// landed right after it.
+			if m := s.engagements[attackerID]; m != nil {
+				if eng, ok := m[victimID]; ok && eng.firstShotFired && !eng.firstShotHit {
+					if float64(tick-eng.firstShotTick)/rate < sprayWindowSecs {
+						eng.firstShotHit = true
+					}
+				}
 			}
 		}
 	}
@@ -66,25 +92,29 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 	// engagement.
 	if vis, ok := s.visStart[victimID]; ok {
 		if entry, ok2 := vis[attackerID]; ok2 {
-			if rate := s.parser.TickRate(); rate > 0 {
-				secs := float64(tick-entry.tick) / rate
-				// Floor at 0.2s — faster than human reaction, so the
-				// attacker was pre-aimed, not reacting. Cap at 3s —
-				// beyond that this is a hold-angle / trigger-discipline
-				// play, not a reaction engagement.
-				if secs >= 0.2 && secs <= 3 {
-					d.SpotToDamageS = &secs
+			// Only derive reaction / crosshair-placement from a spot the
+			// geometry confirms was a real sightline.
+			if s.los(entry.eye, entry.target) {
+				if rate := s.parser.TickRate(); rate > 0 {
+					secs := float64(tick-entry.tick) / rate
+					// Floor at 0.2s — faster than human reaction, so the
+					// attacker was pre-aimed, not reacting. Cap at 3s —
+					// beyond that this is a hold-angle / trigger-discipline
+					// play, not a reaction engagement.
+					if secs >= reactionFloorSecs && secs <= reactionCapSecs {
+						d.SpotToDamageS = &secs
+					}
 				}
-			}
-			spotView := viewVector(entry.yaw, entry.pitch)
-			toTarget := r3.Vector{
-				X: entry.target.X - entry.eye.X,
-				Y: entry.target.Y - entry.eye.Y,
-				Z: entry.target.Z - entry.eye.Z,
-			}
-			angle := angleBetweenDeg(spotView, toTarget)
-			if angle >= 0 && angle <= 90 {
-				d.CrosshairDeltaDeg = &angle
+				spotView := viewVector(entry.yaw, entry.pitch)
+				toTarget := r3.Vector{
+					X: entry.target.X - entry.eye.X,
+					Y: entry.target.Y - entry.eye.Y,
+					Z: entry.target.Z - entry.eye.Z,
+				}
+				angle := angleBetweenDeg(spotView, toTarget)
+				if angle >= 0 && angle <= 90 {
+					d.CrosshairDeltaDeg = &angle
+				}
 			}
 			delete(vis, attackerID)
 		}
@@ -133,7 +163,7 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 			target: target,
 		}
 		rate := s.parser.TickRate()
-		recent := func(fe visEntry) bool { return rate <= 0 || float64(tick-fe.tick)/rate <= 1.5 }
+		recent := func(fe visEntry) bool { return rate <= 0 || float64(tick-fe.tick)/rate <= fovEntryRecentSecs }
 		if w, ok := s.fovEntryWide[spottedID][pid]; ok && recent(w) {
 			entry = w
 			if t, ok2 := s.fovEntryTight[spottedID][pid]; ok2 && recent(t) {
@@ -141,6 +171,14 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 			}
 		}
 		next[pid] = entry
+		// Only treat this as a real spot/engagement when the geometry
+		// confirms a clear sightline — CS2's spotted flag can fire through
+		// smoke, thin gaps, or the edge of vision.
+		if !s.los(entry.eye, entry.target) {
+			continue
+		}
+		// Begin tracking this attacker→victim engagement from first sight.
+		s.openEngagement(pid, spottedID, entry)
 		s.res.Spotted = append(s.res.Spotted, EventSpotted{
 			Tick:           tick,
 			Round:          s.currentRound,

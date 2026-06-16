@@ -33,6 +33,8 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	s.currentRoundStartTick = s.parser.GameState().IngameTick()
 	s.currentFreezeEndTick = 0
 	s.liveRound = false
+	// Flush any engagement still open from the prior round, then reset.
+	s.closeAllEngagements()
 	// Entities are reused across rounds but visibility resets at
 	// freeze break, so a fresh sighting always starts each round.
 	s.visStart = map[string]map[string]visEntry{}

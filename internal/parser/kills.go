@@ -46,6 +46,10 @@ func (s *state) onKill(e events.Kill) {
 	}
 	s.res.Kills = append(s.res.Kills, k)
 
+	// The victim is gone — flush every engagement they were part of, as
+	// attacker (their bids end) or victim (their attackers' bids resolve).
+	s.closeEngagementsFor(steamIDStr(e.Victim))
+
 	// A CT carrying a defuse kit drops it on death — record the spot
 	// so the replay can render a kit icon at that location until
 	// another CT picks it up. (We don't yet track pickup; for now the
