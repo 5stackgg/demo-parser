@@ -48,6 +48,11 @@ type state struct {
 	// Per-attacker last shot: used to flag spray shots (250ms window)
 	// and inherit the spray flag onto damages.
 	lastShot map[string]shotMark
+	// Indices into res.ShotsFired that have not yet been matched to a damage
+	// event, oldest first, per attacker. A burst lands several rounds inside one
+	// spray window, so pairing damage against only the most recent shot leaves
+	// the rest of the burst looking like it missed.
+	pendingShots map[string][]int
 
 	victimHealth map[string]int
 
@@ -172,6 +177,7 @@ func Parse(r io.Reader) (*Result, error) {
 		visStart:     map[string]map[string]visEntry{},
 		frames:       map[string]playerFrame{},
 		lastShot:     map[string]shotMark{},
+		pendingShots: map[string][]int{},
 		victimHealth: map[string]int{},
 		lastMoveTick: map[string]int{},
 		fovEntry:     map[string]map[string]visEntry{},

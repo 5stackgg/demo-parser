@@ -233,8 +233,24 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		}
 	}
 
+	// Where the round actually stopped, when it did not hit anybody. Without
+	// this a miss has no end point, so the replay flies it a fixed distance and
+	// bullets sail straight through walls. We already have the map's collision
+	// mesh and a raycaster for the sightline work, so the real wall is one query
+	// away. Hits keep their victim impact point, filled in by onPlayerHurt.
+	s.ensureMesh()
+	if s.mesh != nil {
+		dir := viewVector(yaw, pitch)
+		if dist, ok := s.mesh.RayHitDist(eye, dir); ok && dist > 0 {
+			ev.MissX = f32ptr(eye.X + dir.X*dist)
+			ev.MissY = f32ptr(eye.Y + dir.Y*dist)
+			ev.MissZ = f32ptr(eye.Z + dir.Z*dist)
+		}
+	}
+
 	s.res.ShotsFired = append(s.res.ShotsFired, ev)
 	idx := len(s.res.ShotsFired) - 1
 	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray, enemySpotted: enemySpotted, idx: idx}
+	s.pendingShots[attackerID] = append(s.pendingShots[attackerID], idx)
 	s.recordEngagementShot(attackerID, eye, yaw, pitch, ev.Weapon)
 }

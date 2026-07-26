@@ -40,6 +40,7 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	s.visStart = map[string]map[string]visEntry{}
 	// Sprays don't carry across rounds.
 	s.lastShot = map[string]shotMark{}
+	s.pendingShots = map[string][]int{}
 	s.victimHealth = map[string]int{}
 	s.fovEntry = map[string]map[string]visEntry{}
 	s.fovLosProbe = map[[2]string]int{}

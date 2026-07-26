@@ -1,7 +1,10 @@
 package parser
 
 import (
+	"math"
+
 	"github.com/golang/geo/r3"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
 )
 
@@ -43,21 +46,19 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 			if prev.isSpray && prev.enemySpotted {
 				fromSpray = true
 			}
-			// Backfill the firing shot's outcome (for the 3D tracer color)
-			// and end-point. First damage wins; headshot beats body.
-			if prev.idx >= 0 && prev.idx < len(s.res.ShotsFired) {
-				sh := &s.res.ShotsFired[prev.idx]
-				if sh.Result == "" {
-					if headshot {
-						sh.Result = "headshot"
-					} else {
-						sh.Result = "hit"
-					}
-					veye, _ := e.Player.PositionEyes()
-					sh.ImpactX = f32ptr(veye.X)
-					sh.ImpactY = f32ptr(veye.Y)
-					sh.ImpactZ = f32ptr(veye.Z)
+			// Backfill the firing shot's outcome (for the 3D tracer color) and
+			// end-point onto whichever round of the burst this damage belongs to.
+			if idx, ok := s.claimShotForDamage(attackerID, tick); ok {
+				sh := &s.res.ShotsFired[idx]
+				if headshot {
+					sh.Result = "headshot"
+				} else {
+					sh.Result = "hit"
 				}
+				ix, iy, iz := s.impactPoint(e.Player, sh, int(e.HitGroup))
+				sh.ImpactX = f32ptr(ix)
+				sh.ImpactY = f32ptr(iy)
+				sh.ImpactZ = f32ptr(iz)
 			}
 			// Mark the engagement's first shot as a hit if this damage
 			// landed right after it.
@@ -198,4 +199,74 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 		})
 	}
 	s.visStart[spottedID] = next
+}
+
+// claimShotForDamage matches one damage event to the oldest unresolved shot the
+// attacker fired inside the spray window, and drops anything older than that
+// window on the way past. Matching against only the latest shot left every
+// round of a burst but one with no recorded impact, so the replay flew them on
+// to the wall behind the victim as though they had missed.
+func (s *state) claimShotForDamage(attackerID string, tick int) (int, bool) {
+	queue := s.pendingShots[attackerID]
+	if len(queue) == 0 {
+		return 0, false
+	}
+	rate := s.parser.TickRate()
+	kept := queue[:0]
+	claimed, found := 0, false
+	for _, idx := range queue {
+		if idx < 0 || idx >= len(s.res.ShotsFired) {
+			continue
+		}
+		sh := &s.res.ShotsFired[idx]
+		if rate > 0 && float64(tick-sh.Tick)/rate > sprayWindowSecs {
+			continue
+		}
+		if !found && sh.Result == "" {
+			claimed, found = idx, true
+			continue
+		}
+		kept = append(kept, idx)
+	}
+	s.pendingShots[attackerID] = kept
+	return claimed, found
+}
+
+// Heights above the victim's origin (their feet) that each hit group sits at,
+// so a leg shot terminates at a leg rather than at eye level. Source hit group
+// ids: 1 head, 2 chest, 3 stomach, 4/5 arms, 6/7 legs.
+func hitGroupHeight(hitGroup int) float64 {
+	switch hitGroup {
+	case 1:
+		return 68
+	case 3:
+		return 44
+	case 6, 7:
+		return 22
+	default:
+		return 55
+	}
+}
+
+// impactPoint is where the round met the victim: their body at the height of
+// the hit group, pulled back toward the shooter by roughly half a player's
+// width so the tracer stops on the near surface instead of running through to
+// the far side, which read as the shot sailing past them.
+func (s *state) impactPoint(victim *common.Player, sh *EventShotFired, hitGroup int) (float64, float64, float64) {
+	pos := victim.Position()
+	height := hitGroupHeight(hitGroup)
+	if victim.IsDucking() {
+		height *= 0.72
+	}
+	x, y, z := pos.X, pos.Y, pos.Z+height
+	if sh.EyeX == nil || sh.EyeY == nil || sh.EyeZ == nil {
+		return x, y, z
+	}
+	dx, dy, dz := float64(*sh.EyeX)-x, float64(*sh.EyeY)-y, float64(*sh.EyeZ)-z
+	dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	if dist < 1 {
+		return x, y, z
+	}
+	const bodyRadius = 16
+	return x + dx/dist*bodyRadius, y + dy/dist*bodyRadius, z + dz/dist*bodyRadius
 }

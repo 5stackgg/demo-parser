@@ -117,6 +117,13 @@ type EventShotFired struct {
 	ImpactX *float32 `json:"impact_x,omitempty"`
 	ImpactY *float32 `json:"impact_y,omitempty"`
 	ImpactZ *float32 `json:"impact_z,omitempty"`
+	// MissX/Y/Z is where the round met world geometry, raycast against the map's
+	// collision mesh at the moment of firing. Lets a missed shot stop at the
+	// wall it hit instead of flying a made-up distance through it. Absent when
+	// the map has no mesh, or the shot found nothing (out into the skybox).
+	MissX *float32 `json:"miss_x,omitempty"`
+	MissY *float32 `json:"miss_y,omitempty"`
+	MissZ *float32 `json:"miss_z,omitempty"`
 }
 
 // EventAimEngagement is one attacker's bid against one victim, opened
