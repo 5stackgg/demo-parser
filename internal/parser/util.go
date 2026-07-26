@@ -250,6 +250,45 @@ func grenadeValue(p *common.Player) int {
 	return total
 }
 
+// bodySampleOffsets are the fractions of a player's eye height at which the
+// torso is sampled for visibility, plus the sideways offset (source units)
+// used to reach the edges of the ~32-wide player box.
+const (
+	chestFrac    = 0.72
+	pelvisFrac   = 0.50
+	lateralUnits = 10.0
+)
+
+// bodySamplePoints expands a player standing at feet with eyes at eye into the
+// extra points a visibility test falls back to when the eyes themselves are
+// occluded — chest and pelvis on the centre line, plus the left/right edges of
+// the box at eye and chest height. The eye point itself is deliberately absent:
+// callers test it first and only reach here when it failed.
+func bodySamplePoints(from, eye, feet r3.Vector) []r3.Vector {
+	h := eye.Z - feet.Z
+	if h <= 0 {
+		h = 64
+	}
+	chestZ := feet.Z + h*chestFrac
+	pts := []r3.Vector{
+		{X: eye.X, Y: eye.Y, Z: chestZ},
+		{X: eye.X, Y: eye.Y, Z: feet.Z + h*pelvisFrac},
+	}
+	// Sideways offset perpendicular to the sightline, in the horizontal plane.
+	dx, dy := eye.X-from.X, eye.Y-from.Y
+	l := math.Sqrt(dx*dx + dy*dy)
+	if l < 1e-6 {
+		return pts
+	}
+	px, py := -dy/l*lateralUnits, dx/l*lateralUnits
+	return append(pts,
+		r3.Vector{X: eye.X + px, Y: eye.Y + py, Z: eye.Z},
+		r3.Vector{X: eye.X - px, Y: eye.Y - py, Z: eye.Z},
+		r3.Vector{X: eye.X + px, Y: eye.Y + py, Z: chestZ},
+		r3.Vector{X: eye.X - px, Y: eye.Y - py, Z: chestZ},
+	)
+}
+
 func angleBetweenDeg(a, b r3.Vector) float32 {
 	la := math.Sqrt(a.X*a.X + a.Y*a.Y + a.Z*a.Z)
 	lb := math.Sqrt(b.X*b.X + b.Y*b.Y + b.Z*b.Z)

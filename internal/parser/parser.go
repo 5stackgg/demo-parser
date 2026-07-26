@@ -53,8 +53,64 @@ type state struct {
 
 	lastMoveTick map[string]int
 
-	fovEntryWide  map[string]map[string]visEntry
-	fovEntryTight map[string]map[string]visEntry
+	// (spotted, spotter) → the tick that pair first became visible on the
+	// spotter's screen. One anchor serves both reaction and crosshair
+	// placement; see trackFOV.
+	fovEntry map[string]map[string]visEntry
+
+	// (spotted, spotter) → last tick trackFOV cast a sightline ray for a pair
+	// that is on screen but not yet confirmed visible. Throttles the
+	// per-frame raycasting to fovLosEveryTicks.
+	fovLosProbe map[[2]string]int
+
+	// Deployed smoke clouds, and entity-id → index for the ones still active.
+	// Consulted by losAt so every sightline-gated stat accounts for smoke.
+	smokes     []smokeCloud
+	smokeByEnt map[int]int
+	// Explosions currently holding a hole open in the smoke.
+	blasts []smokeBlast
+
+	// Live infernos, keyed by the library's unique id (entity ids get reused).
+	infernos          map[int]*infernoTrack
+	lastInfernoSample int
+	infernoFires      int
+	// Demo tick rate, mirrored off the parser each frame so the smoke bloom
+	// ramp can be evaluated from state alone.
+	tickRate float64
+	// Diagnostics for the [smoke] log line. smokeBlocks counts raycasts, not
+	// sightlines: visibleAt escalates a blocked eye ray into the body samples,
+	// so one obscured player contributes several. It is a "this is firing"
+	// signal — the effect on stats is the spotted/engagement counts.
+	smokeOpened int
+	smokeBlocks int
+	smokeVoxels int
+	// Clouds whose flood found almost nothing, so they fall back to a sphere.
+	// A non-zero count means the mesh and the demo disagree about where the
+	// world is — most likely a surface the mesh pipeline dropped.
+	smokeSealed int
+	// Blasts recorded, and sightlines that survived because one had cleared the
+	// smoke in the way.
+	blastCount   int
+	blastLetTh   int
+	blastQueries int
+
+	// Door leaves reconstructed from entity state, re-scanned each round.
+	// Consulted by losAt because the collision mesh contains no doors.
+	doors           []*doorLeaf
+	doorSeen        map[int]bool
+	doorLastScan    int
+	doorsTracked    int
+	doorsMoved      int
+	doorBlocks      int
+	doorsNoBounds   int
+	doorsDegenerate int
+	doorsNoOrigin   int
+
+	// Recent eye positions per player, oldest first. Lets aim angles be
+	// measured against the target as the shooter's client rendered it
+	// (interpolated ~2 ticks behind the server) rather than where the server
+	// had already moved it.
+	eyeHistory map[string][]eyeSample
 
 	// [attacker][victim] → in-flight engagement. Opened on first sight,
 	// flushed to res.AimEngagements on the victim's death, timeout, or
@@ -111,20 +167,24 @@ type grenadeProjectile struct {
 // events collected before the abort.
 func Parse(r io.Reader) (*Result, error) {
 	s := &state{
-		parser:        dem.NewParser(r),
-		res:           &Result{},
-		visStart:      map[string]map[string]visEntry{},
-		frames:        map[string]playerFrame{},
-		lastShot:      map[string]shotMark{},
-		victimHealth:  map[string]int{},
-		lastMoveTick:  map[string]int{},
-		fovEntryWide:  map[string]map[string]visEntry{},
-		fovEntryTight: map[string]map[string]visEntry{},
-		engagements:   map[string]map[string]*engagement{},
-		playerNames:   map[string]string{},
-		playerRanks:   map[string]playerRank{},
-		grenadePos:    map[int]grenadeProjectile{},
-		grenadePaths:  map[int][]GrenadePathPt{},
+		parser:       dem.NewParser(r),
+		res:          &Result{},
+		visStart:     map[string]map[string]visEntry{},
+		frames:       map[string]playerFrame{},
+		lastShot:     map[string]shotMark{},
+		victimHealth: map[string]int{},
+		lastMoveTick: map[string]int{},
+		fovEntry:     map[string]map[string]visEntry{},
+		fovLosProbe:  map[[2]string]int{},
+		smokeByEnt:   map[int]int{},
+		infernos:     map[int]*infernoTrack{},
+		doorSeen:     map[int]bool{},
+		eyeHistory:   map[string][]eyeSample{},
+		engagements:  map[string]map[string]*engagement{},
+		playerNames:  map[string]string{},
+		playerRanks:  map[string]playerRank{},
+		grenadePos:   map[int]grenadeProjectile{},
+		grenadePaths: map[int][]GrenadePathPt{},
 	}
 	defer s.parser.Close()
 
@@ -174,6 +234,7 @@ func (s *state) registerHandlers() {
 	s.parser.RegisterEventHandler(s.onHeExplode)
 	s.parser.RegisterEventHandler(s.onFlashExplode)
 	s.parser.RegisterEventHandler(s.onSmokeStart)
+	s.parser.RegisterEventHandler(s.onSmokeExpired)
 	s.parser.RegisterEventHandler(s.onFireGrenadeStart)
 	s.parser.RegisterEventHandler(s.onPlayerFlashed)
 }
@@ -241,6 +302,28 @@ func (s *state) finalize() {
 	// demo had no engagements to trigger lazy loading.
 	s.ensureMesh()
 	s.res.GeometryValidated = s.mesh != nil
+
+	fmt.Fprintf(
+		os.Stderr,
+		"[smoke] clouds=%d voxels=%d rays_blocked=%d collapsed=%d "+
+			"blasts=%d rays_during_blast=%d rays_saved_by_blast=%d\n",
+		s.smokeOpened, s.smokeVoxels, s.smokeBlocks, s.smokeSealed,
+		s.blastCount, s.blastQueries, s.blastLetTh,
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"[doors] distinct=%d max_concurrent=%d movements=%d sightlines_blocked=%d "+
+			"skipped(no_bounds=%d degenerate=%d no_origin=%d)\n",
+		len(s.doorSeen), s.doorsTracked, s.doorsMoved, s.doorBlocks,
+		s.doorsNoBounds, s.doorsDegenerate, s.doorsNoOrigin,
+	)
+
+	s.flushInfernos()
+	fmt.Fprintf(
+		os.Stderr,
+		"[inferno] burns=%d flames=%d\n",
+		len(s.res.Infernos), s.infernoFires,
+	)
 
 	s.computeTrades()
 
@@ -337,16 +420,50 @@ func (s *state) ensureMesh() {
 	}
 }
 
-// los reports whether two eye points have a clear line of sight through the
-// map geometry. The mesh is lazy-loaded on first use (after MapName is known);
-// when no mesh is available it returns true so sightline-gated stats fall back
-// to their unvalidated behaviour rather than dropping to zero.
-func (s *state) los(a, b r3.Vector) bool {
+// losAt reports whether two points had a clear line of sight at a given tick —
+// through the map geometry and through any smoke deployed then. The mesh is
+// lazy-loaded on first use (after MapName is known); when no mesh is available
+// the world check passes so sightline-gated stats fall back to their
+// unvalidated behaviour rather than dropping to zero. Smoke is still applied,
+// since it needs no mesh.
+//
+// The tick matters: some callers re-validate a spot buffered up to
+// its lookback window ago, and the smoke covering that sightline may not have
+// existed yet.
+func (s *state) losAt(tick int, a, b r3.Vector) bool {
 	s.ensureMesh()
-	if s.mesh == nil {
+	if s.mesh != nil {
+		if s.mesh.Occluded(a, b) {
+			return false
+		}
+		// Doors are gated on having a mesh: without the surrounding walls they
+		// would be the only occluder on the map, which is worse than the
+		// existing "treat everything as visible" fallback.
+		if s.doorOccluded(a, b) {
+			return false
+		}
+	}
+	return !s.smokeOccluded(tick, a, b)
+}
+
+func (s *state) los(a, b r3.Vector) bool {
+	return s.losAt(s.parser.GameState().IngameTick(), a, b)
+}
+
+// visibleAt reports whether any part of a player (eyes at eye, standing on
+// feet) was visible from an observer's eye at a tick. The eye-to-eye ray is
+// tested first and short-circuits, so the common case costs exactly one ray as
+// before; the body samples are only paid for when the eyes are occluded.
+func (s *state) visibleAt(tick int, from, eye, feet r3.Vector) bool {
+	if s.losAt(tick, from, eye) {
 		return true
 	}
-	return !s.mesh.Occluded(a, b)
+	for _, p := range bodySamplePoints(from, eye, feet) {
+		if s.losAt(tick, from, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *state) captureMaxTick() {

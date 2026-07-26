@@ -93,8 +93,9 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 	if vis, ok := s.visStart[victimID]; ok {
 		if entry, ok2 := vis[attackerID]; ok2 {
 			// Only derive reaction / crosshair-placement from a spot the
-			// geometry confirms was a real sightline.
-			if s.los(entry.eye, entry.target) {
+			// geometry confirms was a real sightline — evaluated at the tick
+			// the spot happened, since the smoke situation has since moved on.
+			if s.visibleAt(entry.tick, entry.eye, entry.target, entry.targetFeet) {
 				if rate := s.parser.TickRate(); rate > 0 {
 					secs := float64(tick-entry.tick) / rate
 					// Floor at 0.2s — faster than human reaction, so the
@@ -106,10 +107,13 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 					}
 				}
 				spotView := viewVector(entry.yaw, entry.pitch)
+				// Measured against where the spotter's client was drawing the
+				// target, not where the server had it — crosshair placement is
+				// a question about their screen.
 				toTarget := r3.Vector{
-					X: entry.target.X - entry.eye.X,
-					Y: entry.target.Y - entry.eye.Y,
-					Z: entry.target.Z - entry.eye.Z,
+					X: entry.targetView.X - entry.eye.X,
+					Y: entry.targetView.Y - entry.eye.Y,
+					Z: entry.targetView.Z - entry.eye.Z,
 				}
 				angle := angleBetweenDeg(spotView, toTarget)
 				if angle >= 0 && angle <= 90 {
@@ -156,27 +160,33 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 		eye, _ := p.PositionEyes()
 		target, _ := e.Spotted.PositionEyes()
 		entry := visEntry{
-			tick:   tick,
-			yaw:    p.ViewDirectionX(),
-			pitch:  p.ViewDirectionY(),
-			eye:    eye,
-			target: target,
+			tick:       tick,
+			yaw:        p.ViewDirectionX(),
+			pitch:      p.ViewDirectionY(),
+			eye:        eye,
+			target:     target,
+			targetFeet: e.Spotted.Position(),
+			targetView: s.eyeAsRendered(spottedID, tick, target),
 		}
+		// Only treat this as a real spot/engagement when the geometry and the
+		// smoke situation confirm a clear sightline — CS2's spotted flag can
+		// fire through smoke, thin gaps, or the edge of vision. Checked on the
+		// engine's own spot, before the on-screen anchor is substituted in;
+		// that anchor was already visibility-validated when trackFOV recorded
+		// it.
+		if !s.visibleAt(tick, entry.eye, entry.target, entry.targetFeet) {
+			next[pid] = entry
+			continue
+		}
+		// Prefer the moment the enemy actually appeared on this spotter's
+		// screen over the engine's own (late, near-centred) spotted flag.
 		rate := s.parser.TickRate()
-		recent := func(fe visEntry) bool { return rate <= 0 || float64(tick-fe.tick)/rate <= fovEntryRecentSecs }
-		if w, ok := s.fovEntryWide[spottedID][pid]; ok && recent(w) {
-			entry = w
-			if t, ok2 := s.fovEntryTight[spottedID][pid]; ok2 && recent(t) {
-				entry.yaw, entry.pitch, entry.eye, entry.target = t.yaw, t.pitch, t.eye, t.target
+		if fe, ok := s.fovEntry[spottedID][pid]; ok {
+			if rate <= 0 || float64(tick-fe.tick)/rate <= fovAnchorLookbackSecs {
+				entry = fe
 			}
 		}
 		next[pid] = entry
-		// Only treat this as a real spot/engagement when the geometry
-		// confirms a clear sightline — CS2's spotted flag can fire through
-		// smoke, thin gaps, or the edge of vision.
-		if !s.los(entry.eye, entry.target) {
-			continue
-		}
 		// Begin tracking this attacker→victim engagement from first sight.
 		s.openEngagement(pid, spottedID, entry)
 		s.res.Spotted = append(s.res.Spotted, EventSpotted{

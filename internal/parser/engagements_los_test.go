@@ -1,8 +1,6 @@
 package parser
 
 import (
-	"encoding/binary"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,28 +9,14 @@ import (
 	"github.com/golang/geo/r3"
 )
 
-// wallTriBlob serializes a single wall quad (two triangles in the X=0 plane,
-// y,z ∈ [-50,50]) into the .tri wire format (9 LE float32 per triangle).
+// wallTriBlob is a single wall quad (two triangles in the X=0 plane,
+// y,z ∈ [-50,50]) in the .tri wire format.
 func wallTriBlob() []byte {
 	a := r3.Vector{X: 0, Y: -50, Z: -50}
 	b := r3.Vector{X: 0, Y: 50, Z: -50}
 	c := r3.Vector{X: 0, Y: 50, Z: 50}
 	d := r3.Vector{X: 0, Y: -50, Z: 50}
-	tris := [][3]r3.Vector{{a, b, c}, {a, c, d}}
-	buf := make([]byte, 0, len(tris)*9*4)
-	put := func(f float64) {
-		var p [4]byte
-		binary.LittleEndian.PutUint32(p[:], math.Float32bits(float32(f)))
-		buf = append(buf, p[:]...)
-	}
-	for _, tr := range tris {
-		for _, v := range tr {
-			put(v.X)
-			put(v.Y)
-			put(v.Z)
-		}
-	}
-	return buf
+	return triBlob([3]r3.Vector{a, b, c}, [3]r3.Vector{a, c, d})
 }
 
 func TestLosGating(t *testing.T) {
@@ -71,8 +55,8 @@ func TestLosGating(t *testing.T) {
 				s.mesh = mesh
 				s.meshTried = true
 			}
-			if got := s.los(from, to); got != tc.want {
-				t.Fatalf("los = %v, want %v", got, tc.want)
+			if got := s.losAt(0, from, to); got != tc.want {
+				t.Fatalf("losAt = %v, want %v", got, tc.want)
 			}
 		})
 	}

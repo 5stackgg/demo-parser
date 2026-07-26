@@ -140,6 +140,59 @@ type EventAimEngagement struct {
 	WeaponClass string `json:"weapon_class,omitempty"`
 }
 
+// EventSmokeVolume is one deployed smoke's occupancy grid, derived by flooding
+// the free space around its detonation point against the map's collision mesh.
+// It is what the sightline tests use, and what the 2D radar and 3D replay draw,
+// so all three agree on the shape a smoke actually had.
+//
+// Density is base64, two cells per byte — the low nibble first — over
+// DimX*DimY*DimZ cells, x-major then y then z. Cell (i,j,k) is at index
+// (k*DimY + j)*DimX + i and has its minimum corner at Origin + (i,j,k)*VoxelSize.
+// 0 means clear and 15 means fully dense. The grid is trimmed to the occupied
+// bounding box, so Origin is the corner of that box rather than of the search
+// budget.
+type EventSmokeVolume struct {
+	GrenadeID int `json:"gid,omitempty"`
+	Round     int `json:"round,omitempty"`
+	StartTick int `json:"start_tick"`
+	// EndTick is the engine's own SmokeExpired, so renderers fade the cloud
+	// when it actually cleared instead of after a guessed duration.
+	EndTick   int     `json:"end_tick,omitempty"`
+	OriginX   float32 `json:"ox"`
+	OriginY   float32 `json:"oy"`
+	OriginZ   float32 `json:"oz"`
+	VoxelSize float32 `json:"vs"`
+	DimX      int     `json:"dx"`
+	DimY      int     `json:"dy"`
+	DimZ      int     `json:"dz"`
+	Density   string  `json:"den,omitempty"`
+}
+
+// EventInfernoFire is one flame within an inferno: where it burned and the tick
+// range over which it was alight. Positions come straight off the demo — the
+// engine networks each flame individually — so this is the exact ground a
+// molotov denied, not an approximation of it.
+type EventInfernoFire struct {
+	X         float32 `json:"x"`
+	Y         float32 `json:"y"`
+	Z         float32 `json:"z"`
+	StartTick int     `json:"s"`
+	// EndTick is the last tick this flame was burning. It comes in early when a
+	// smoke puts the fire out, which the engine reports for us.
+	EndTick int `json:"e"`
+}
+
+// EventInferno is one molotov or incendiary's full burn.
+type EventInferno struct {
+	ID             int                `json:"id"`
+	Round          int                `json:"round,omitempty"`
+	ThrowerSteamID string             `json:"thrower,omitempty"`
+	ThrowerTeam    string             `json:"thrower_team,omitempty"`
+	StartTick      int                `json:"start_tick"`
+	EndTick        int                `json:"end_tick,omitempty"`
+	Fires          []EventInfernoFire `json:"fires,omitempty"`
+}
+
 // EventPosition is a low-frequency (~4Hz) sample of a single player's
 // world position + view yaw. The replay viewer interpolates between
 // adjacent samples to render a 2D radar timeline.
@@ -327,6 +380,8 @@ type Result struct {
 	PlayerTrades        []PlayerTrade          `json:"player_trades,omitempty"`
 	GrenadeTrajectories []GrenadeTrajectory    `json:"grenade_trajectories,omitempty"`
 	AimEngagements      []EventAimEngagement   `json:"aim_engagements,omitempty"`
+	SmokeVolumes        []EventSmokeVolume     `json:"smoke_volumes,omitempty"`
+	Infernos            []EventInferno         `json:"infernos,omitempty"`
 }
 
 // Speed is derived from position deltas between FrameDone events.
@@ -344,6 +399,18 @@ type playerFrame struct {
 	yaw   float32
 	pitch float32
 	eye   r3.Vector
+	// Seconds of flashbang blindness still remaining. A fully blinded player
+	// isn't seeing anything, so they don't open engagements or accumulate
+	// tracking frames.
+	blindRemaining float64
+}
+
+// eyeSample is one tick of a player's eye position, kept in a short ring so
+// aim angles can be measured against the target the shooter's client was
+// rendering rather than the one the server had already advanced.
+type eyeSample struct {
+	tick int
+	eye  r3.Vector
 }
 
 // engagement is the mutable in-flight state for one attacker→victim bid.
@@ -367,11 +434,18 @@ type engagement struct {
 // spotter's eye angles at that instant. Consumed by the next matching
 // PlayerHurt event to compute spot-to-damage and crosshair delta.
 type visEntry struct {
-	tick   int
-	yaw    float32
-	pitch  float32
-	eye    r3.Vector
-	target r3.Vector
+	tick  int
+	yaw   float32
+	pitch float32
+	eye   r3.Vector
+	// target is the victim's server-side eye position, used for the sightline
+	// check; targetFeet lets that check fall back to the body when the eyes are
+	// occluded. targetView is the same eye position rewound to where the
+	// spotter's client was rendering it, and is what the crosshair angle is
+	// measured against.
+	target     r3.Vector
+	targetFeet r3.Vector
+	targetView r3.Vector
 }
 
 // shotMark records the attacker's last shot tick + whether that shot

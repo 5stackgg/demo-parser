@@ -14,6 +14,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 		return
 	}
 	tickRate := s.parser.TickRate()
+	s.tickRate = tickRate
 	curTick := s.parser.GameState().IngameTick()
 	seen := map[string]bool{}
 	for _, p := range s.parser.GameState().Participants().Playing() {
@@ -42,16 +43,18 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 		}
 		eye, _ := p.PositionEyes()
 		s.frames[sid] = playerFrame{
-			pos:      pos,
-			speed:    speed,
-			hasSpeed: hasSpeed,
-			team:     p.Team,
-			alive:    true,
-			tick:     curTick,
-			yaw:      p.ViewDirectionX(),
-			pitch:    p.ViewDirectionY(),
-			eye:      eye,
+			pos:            pos,
+			speed:          speed,
+			hasSpeed:       hasSpeed,
+			team:           p.Team,
+			alive:          true,
+			tick:           curTick,
+			yaw:            p.ViewDirectionX(),
+			pitch:          p.ViewDirectionY(),
+			eye:            eye,
+			blindRemaining: p.FlashDurationTimeRemaining().Seconds(),
 		}
+		s.recordEye(sid, curTick, eye)
 		if hasSpeed && speed > 100 {
 			s.lastMoveTick[sid] = curTick
 		}
@@ -63,6 +66,8 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 		}
 	}
 
+	s.updateDoors()
+	s.trackInfernos()
 	s.trackFOV()
 	s.trackEngagements()
 
@@ -161,7 +166,7 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 		// spotted flag (which leaks through smoke / thin gaps).
 		if p.IsSpottedBy(e.Shooter) {
 			enemyEye, _ := p.PositionEyes()
-			if s.los(eye, enemyEye) {
+			if s.visibleAt(s.parser.GameState().IngameTick(), eye, enemyEye, p.Position()) {
 				enemySpotted = true
 				break
 			}

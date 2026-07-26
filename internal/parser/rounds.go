@@ -41,8 +41,15 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	// Sprays don't carry across rounds.
 	s.lastShot = map[string]shotMark{}
 	s.victimHealth = map[string]int{}
-	s.fovEntryWide = map[string]map[string]visEntry{}
-	s.fovEntryTight = map[string]map[string]visEntry{}
+	s.fovEntry = map[string]map[string]visEntry{}
+	s.fovLosProbe = map[[2]string]int{}
+	s.eyeHistory = map[string][]eyeSample{}
+	// Projectiles are cleaned up between rounds without always firing
+	// SmokeExpired, so stale clouds would keep occluding into the next round.
+	s.resetSmokes()
+	// Door entities are recreated on round transitions, so the cached leaves
+	// would point at dead entities.
+	s.scanDoors()
 	s.res.RoundTicks = append(s.res.RoundTicks, RoundTick{
 		Round:     s.currentRound,
 		StartTick: s.currentRoundStartTick,

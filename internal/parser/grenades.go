@@ -1,6 +1,9 @@
 package parser
 
-import "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+import (
+	"github.com/golang/geo/r3"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+)
 
 // onGrenadeProjectileThrow fires when the projectile entity is
 // created — i.e. the moment the grenade leaves the player's hand.
@@ -209,6 +212,13 @@ func (s *state) onHeExplode(e events.HeExplode) {
 		return
 	}
 	s.emitDetonate(e.GrenadeEvent, "HE")
+	// An HE punches a hole in any smoke it lands in, so record the blast for
+	// the sightline tests. emitDetonate has just resolved the true position,
+	// which is more reliable than the event's own on some CS2 demos.
+	if n := len(s.res.GrenadeDetonations); n > 0 {
+		d := s.res.GrenadeDetonations[n-1]
+		s.recordBlast(d.Tick, r3.Vector{X: float64(d.X), Y: float64(d.Y), Z: float64(d.Z)}, heBlastRadius, heBlastFullRadius)
+	}
 }
 
 func (s *state) onFlashExplode(e events.FlashExplode) {
@@ -216,13 +226,6 @@ func (s *state) onFlashExplode(e events.FlashExplode) {
 		return
 	}
 	s.emitDetonate(e.GrenadeEvent, "Flash")
-}
-
-func (s *state) onSmokeStart(e events.SmokeStart) {
-	if !s.matchStarted {
-		return
-	}
-	s.emitDetonate(e.GrenadeEvent, "Smoke")
 }
 
 func (s *state) onFireGrenadeStart(e events.FireGrenadeStart) {
