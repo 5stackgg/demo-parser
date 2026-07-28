@@ -345,8 +345,9 @@ type PlayerTrade struct {
 }
 
 type PlayerInfo struct {
-	SteamID      string `json:"steam_id"`
-	Name         string `json:"name"`
+	SteamID string `json:"steam_id"`
+	Name    string `json:"name"`
+	StartingSide string `json:"starting_side,omitempty"`
 	Rank         int    `json:"rank,omitempty"`
 	RankType     int    `json:"rank_type,omitempty"`
 	PreviousRank int    `json:"previous_rank,omitempty"`

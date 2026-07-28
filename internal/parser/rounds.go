@@ -16,6 +16,8 @@ func (s *state) onMatchStart(_ events.MatchStart) {
 	// round 1 aligned with scoreboard round 1.
 	s.currentRound = 0
 	s.res.RoundTicks = s.res.RoundTicks[:0]
+	// The knife round's sides; the winner may have swapped.
+	clear(s.playerStartSides)
 }
 
 func (s *state) onRoundStart(_ events.RoundStart) {
@@ -28,6 +30,11 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	}
 	if !s.matchStarted {
 		return
+	}
+	// Below the matchStarted gate on purpose: warmup and knife-round sides
+	// are not the sides the scoreboard starts with.
+	for _, p := range s.parser.GameState().Participants().All() {
+		s.recordPlayerStartSide(p)
 	}
 	s.currentRound++
 	s.currentRoundStartTick = s.parser.GameState().IngameTick()

@@ -106,6 +106,27 @@ func (s *state) onRankUpdate(e events.RankUpdate) {
 	)
 }
 
+// Only the first write sticks — sides swap at halftime, so re-reading later
+// would flip half the lineup.
+func (s *state) recordPlayerStartSide(p *common.Player) {
+	if p == nil || p.IsBot {
+		return
+	}
+	sid := steamIDStr(p)
+	if sid == "" {
+		return
+	}
+	if _, ok := s.playerStartSides[sid]; ok {
+		return
+	}
+	side := teamCode(p.Team)
+	// Unassigned/spectator: wait for a round where they're on a team.
+	if side == "" {
+		return
+	}
+	s.playerStartSides[sid] = side
+}
+
 func (s *state) recordPlayerName(p *common.Player) {
 	if p == nil || p.IsBot {
 		return
