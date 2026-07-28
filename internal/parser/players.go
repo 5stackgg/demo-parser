@@ -106,6 +106,31 @@ func (s *state) onRankUpdate(e events.RankUpdate) {
 	)
 }
 
+// recordPlayerStartSide pins a player to the side they held the first
+// counted round they appeared in. Only the first write sticks — sides
+// swap at halftime, so re-reading later would flip half the lineup.
+// Players who join mid-match get their first observed side, which is
+// still the right lineup for them.
+func (s *state) recordPlayerStartSide(p *common.Player) {
+	if p == nil || p.IsBot {
+		return
+	}
+	sid := steamIDStr(p)
+	if sid == "" {
+		return
+	}
+	if _, ok := s.playerStartSides[sid]; ok {
+		return
+	}
+	side := teamCode(p.Team)
+	// Unassigned/spectator — wait for a round where they're actually on a
+	// team rather than locking in an empty side.
+	if side == "" {
+		return
+	}
+	s.playerStartSides[sid] = side
+}
+
 func (s *state) recordPlayerName(p *common.Player) {
 	if p == nil || p.IsBot {
 		return

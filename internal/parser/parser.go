@@ -135,6 +135,11 @@ type state struct {
 	// scoreboard. Premier (rank_type=11) gives the CS Rating number.
 	playerRanks map[string]playerRank
 
+	// steam_id → side ("t"/"ct") at the first counted round the player was
+	// seen in. First write wins: sides swap at halftime, so a later
+	// reading would be the opposite of what the scoreboard started with.
+	playerStartSides map[string]string
+
 	// Last tick at which we emitted a position sample. Throttles
 	// per-tick FrameDone events down to ~4Hz for the 2D replay table.
 	lastPositionSampleTick int
@@ -191,6 +196,8 @@ func Parse(r io.Reader) (*Result, error) {
 		playerRanks:  map[string]playerRank{},
 		grenadePos:   map[int]grenadeProjectile{},
 		grenadePaths: map[int][]GrenadePathPt{},
+
+		playerStartSides: map[string]string{},
 	}
 	defer s.parser.Close()
 
@@ -356,6 +363,7 @@ func (s *state) finalize() {
 		s.res.Players = append(s.res.Players, PlayerInfo{
 			SteamID:      sid,
 			Name:         s.playerNames[sid],
+			StartingSide: s.playerStartSides[sid],
 			Rank:         rank.rank,
 			RankType:     rank.rankType,
 			PreviousRank: rank.previousRank,

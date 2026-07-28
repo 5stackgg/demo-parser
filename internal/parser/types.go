@@ -345,8 +345,12 @@ type PlayerTrade struct {
 }
 
 type PlayerInfo struct {
-	SteamID      string `json:"steam_id"`
-	Name         string `json:"name"`
+	SteamID string `json:"steam_id"`
+	Name    string `json:"name"`
+	// StartingSide is "t"/"ct" as of the first counted round — the demo's
+	// own team assignment, which the importer uses to split the two
+	// lineups instead of guessing from who killed whom in round 1.
+	StartingSide string `json:"starting_side,omitempty"`
 	Rank         int    `json:"rank,omitempty"`
 	RankType     int    `json:"rank_type,omitempty"`
 	PreviousRank int    `json:"previous_rank,omitempty"`

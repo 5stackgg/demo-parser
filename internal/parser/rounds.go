@@ -16,6 +16,9 @@ func (s *state) onMatchStart(_ events.MatchStart) {
 	// round 1 aligned with scoreboard round 1.
 	s.currentRound = 0
 	s.res.RoundTicks = s.res.RoundTicks[:0]
+	// Sides observed before the refire were the knife round's, and the
+	// winner may have swapped — discard them with the rounds.
+	clear(s.playerStartSides)
 }
 
 func (s *state) onRoundStart(_ events.RoundStart) {
@@ -28,6 +31,12 @@ func (s *state) onRoundStart(_ events.RoundStart) {
 	}
 	if !s.matchStarted {
 		return
+	}
+	// Below the matchStarted gate on purpose: CS2 refires MatchStart after
+	// the knife round, and teams may have swapped as a result, so warmup
+	// and knife-round sides are not the sides the scoreboard starts with.
+	for _, p := range s.parser.GameState().Participants().All() {
+		s.recordPlayerStartSide(p)
 	}
 	s.currentRound++
 	s.currentRoundStartTick = s.parser.GameState().IngameTick()
