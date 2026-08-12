@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"testing"
+	"unsafe"
 
 	"github.com/golang/geo/r3"
 )
@@ -143,6 +144,79 @@ func TestRayTriangleDegenerate(t *testing.T) {
 	)
 	if _, ok := rayTriangle(r3.Vector{X: -10, Y: 0, Z: 0}, r3.Vector{X: 1, Y: 0, Z: 0}, &tr); ok {
 		t.Fatal("degenerate (zero-area) triangle should not register a hit")
+	}
+}
+
+// A cached mesh is the single largest thing this process holds — six maps at
+// the old 144-byte triangle and 2N node reservation was ~600 MiB resident.
+// These two guard the layout so that cannot creep back.
+func TestTriangleStaysSmall(t *testing.T) {
+	const want = 36 // 3 vectors × 3 float32
+	if got := unsafe.Sizeof(triangle{}); got != want {
+		t.Fatalf("triangle is %d bytes, want %d — did a build-only field or a float64 come back?", got, want)
+	}
+}
+
+func TestBVHDoesNotOverReserve(t *testing.T) {
+	// Enough triangles that the tree is deep enough for the reservation to
+	// matter, laid out so the median split has real work to do.
+	var verts [][3]r3.Vector
+	for i := 0; i < 4000; i++ {
+		x := float64(i)
+		verts = append(verts, [3]r3.Vector{
+			{X: x, Y: 0, Z: 0},
+			{X: x, Y: 1, Z: 0},
+			{X: x, Y: 1, Z: 1},
+		})
+	}
+	m := meshFromTris(verts...)
+	if slack := cap(m.nodes) - len(m.nodes); slack > len(m.nodes)/8 {
+		t.Fatalf("BVH holds %d nodes in a slice of cap %d — %d wasted", len(m.nodes), cap(m.nodes), slack)
+	}
+	// Sanity: the tree really did get built, and is the size the reservation assumes.
+	if len(m.nodes) == 0 || len(m.nodes) >= len(m.tris) {
+		t.Fatalf("expected under %d nodes for %d triangles, got %d", len(m.tris), len(m.tris), len(m.nodes))
+	}
+}
+
+// Triangles are stored at the .tri file's own float32 precision. Real maps run
+// to ±16384 source units, where float32 still resolves ~0.001 — three orders of
+// magnitude finer than the 2.0-unit endEps — so occlusion must be unaffected at
+// map scale, not just near the origin where the other tests sit.
+func TestOcclusionAtMapScaleCoordinates(t *testing.T) {
+	const (
+		wx = -8000.0 // wall plane, far from the origin
+		wy = 7500.0
+		wz = 6000.0
+	)
+	a := r3.Vector{X: wx, Y: wy - 50, Z: wz - 50}
+	b := r3.Vector{X: wx, Y: wy + 50, Z: wz - 50}
+	c := r3.Vector{X: wx, Y: wy + 50, Z: wz + 50}
+	d := r3.Vector{X: wx, Y: wy - 50, Z: wz + 50}
+	m := meshFromTris([3]r3.Vector{a, b, c}, [3]r3.Vector{a, c, d})
+
+	through := m.Occluded(
+		r3.Vector{X: wx - 300, Y: wy, Z: wz},
+		r3.Vector{X: wx + 300, Y: wy, Z: wz},
+	)
+	if !through {
+		t.Error("segment crossing the wall at map-scale coordinates should be occluded")
+	}
+
+	beside := m.Occluded(
+		r3.Vector{X: wx - 300, Y: wy + 200, Z: wz},
+		r3.Vector{X: wx + 300, Y: wy + 200, Z: wz},
+	)
+	if beside {
+		t.Error("segment passing outside the wall at map-scale coordinates should be clear")
+	}
+
+	dist, ok := m.RayHitDist(r3.Vector{X: wx - 300, Y: wy, Z: wz}, r3.Vector{X: 1})
+	if !ok {
+		t.Fatal("ray at map-scale coordinates should hit the wall")
+	}
+	if math.Abs(dist-300) > 0.05 {
+		t.Errorf("expected hit distance ~300, got %v (float32 storage lost too much)", dist)
 	}
 }
 

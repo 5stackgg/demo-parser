@@ -8,6 +8,7 @@ package geometry
 
 import (
 	"math"
+	"unsafe"
 
 	"github.com/golang/geo/r3"
 )
@@ -16,34 +17,33 @@ import (
 // player hugs / stands on doesn't register as an occluder of its own sightline.
 const endEps = 2.0
 
+// vec3 mirrors the .tri wire precision (little-endian float32), so storing a
+// triangle costs no accuracy over the source data. A competitive map runs to
+// half a million triangles and the cache holds several maps at once, so the
+// 12 bytes saved per vector over r3.Vector is tens of MB per mesh. Ray math
+// widens back to float64.
+type vec3 struct{ X, Y, Z float32 }
+
+func newVec3(v r3.Vector) vec3 {
+	return vec3{X: float32(v.X), Y: float32(v.Y), Z: float32(v.Z)}
+}
+
+// triangle carries only what rayTriangle reads. Bounds and centroids are
+// needed just once, while the BVH is being built, and are cheap to recover
+// from the edges (see triBounds and the split in bvh.go) — storing them would
+// quadruple the resident size of every mesh for the life of the process.
 type triangle struct {
-	v0     r3.Vector
-	e1, e2 r3.Vector // v1-v0, v2-v0 (precomputed for Möller–Trumbore)
-	min    r3.Vector
-	max    r3.Vector
-	cx     float64 // centroid (for BVH median split)
-	cy     float64
-	cz     float64
+	v0     vec3
+	e1, e2 vec3 // v1-v0, v2-v0 (precomputed for Möller–Trumbore)
 }
 
 func newTriangle(a, b, c r3.Vector) triangle {
+	// Subtract at full width, then narrow: differencing after the narrowing
+	// would compound both operands' rounding into the edge.
 	return triangle{
-		v0: a,
-		e1: r3.Vector{X: b.X - a.X, Y: b.Y - a.Y, Z: b.Z - a.Z},
-		e2: r3.Vector{X: c.X - a.X, Y: c.Y - a.Y, Z: c.Z - a.Z},
-		min: r3.Vector{
-			X: math.Min(a.X, math.Min(b.X, c.X)),
-			Y: math.Min(a.Y, math.Min(b.Y, c.Y)),
-			Z: math.Min(a.Z, math.Min(b.Z, c.Z)),
-		},
-		max: r3.Vector{
-			X: math.Max(a.X, math.Max(b.X, c.X)),
-			Y: math.Max(a.Y, math.Max(b.Y, c.Y)),
-			Z: math.Max(a.Z, math.Max(b.Z, c.Z)),
-		},
-		cx: (a.X + b.X + c.X) / 3,
-		cy: (a.Y + b.Y + c.Y) / 3,
-		cz: (a.Z + b.Z + c.Z) / 3,
+		v0: newVec3(a),
+		e1: newVec3(r3.Vector{X: b.X - a.X, Y: b.Y - a.Y, Z: b.Z - a.Z}),
+		e2: newVec3(r3.Vector{X: c.X - a.X, Y: c.Y - a.Y, Z: c.Z - a.Z}),
 	}
 }
 
@@ -52,31 +52,35 @@ func newTriangle(a, b, c r3.Vector) triangle {
 // ray misses or is parallel.
 func rayTriangle(orig, dir r3.Vector, tr *triangle) (float64, bool) {
 	const eps = 1e-9
+	// Widen the stored float32 edges once; the rest of the test runs at full
+	// width so the determinant and barycentrics keep their usual conditioning.
+	e1x, e1y, e1z := float64(tr.e1.X), float64(tr.e1.Y), float64(tr.e1.Z)
+	e2x, e2y, e2z := float64(tr.e2.X), float64(tr.e2.Y), float64(tr.e2.Z)
 	// p = dir × e2
-	px := dir.Y*tr.e2.Z - dir.Z*tr.e2.Y
-	py := dir.Z*tr.e2.X - dir.X*tr.e2.Z
-	pz := dir.X*tr.e2.Y - dir.Y*tr.e2.X
-	det := tr.e1.X*px + tr.e1.Y*py + tr.e1.Z*pz
+	px := dir.Y*e2z - dir.Z*e2y
+	py := dir.Z*e2x - dir.X*e2z
+	pz := dir.X*e2y - dir.Y*e2x
+	det := e1x*px + e1y*py + e1z*pz
 	if det > -eps && det < eps {
 		return 0, false // parallel
 	}
 	inv := 1.0 / det
-	tx := orig.X - tr.v0.X
-	ty := orig.Y - tr.v0.Y
-	tz := orig.Z - tr.v0.Z
+	tx := orig.X - float64(tr.v0.X)
+	ty := orig.Y - float64(tr.v0.Y)
+	tz := orig.Z - float64(tr.v0.Z)
 	u := (tx*px + ty*py + tz*pz) * inv
 	if u < 0 || u > 1 {
 		return 0, false
 	}
 	// q = tvec × e1
-	qx := ty*tr.e1.Z - tz*tr.e1.Y
-	qy := tz*tr.e1.X - tx*tr.e1.Z
-	qz := tx*tr.e1.Y - ty*tr.e1.X
+	qx := ty*e1z - tz*e1y
+	qy := tz*e1x - tx*e1z
+	qz := tx*e1y - ty*e1x
 	v := (dir.X*qx + dir.Y*qy + dir.Z*qz) * inv
 	if v < 0 || u+v > 1 {
 		return 0, false
 	}
-	t := (tr.e2.X*qx + tr.e2.Y*qy + tr.e2.Z*qz) * inv
+	t := (e2x*qx + e2y*qy + e2z*qz) * inv
 	return t, true
 }
 
@@ -92,6 +96,17 @@ func (m *Mesh) Triangles() int {
 		return 0
 	}
 	return len(m.tris)
+}
+
+// Bytes estimates the mesh's resident size. Meshes dominate this process's
+// memory, so logging it makes a regression in either array obvious without
+// having to attach a profiler to a running pod.
+func (m *Mesh) Bytes() int {
+	if m == nil {
+		return 0
+	}
+	return cap(m.tris)*int(unsafe.Sizeof(triangle{})) +
+		cap(m.nodes)*int(unsafe.Sizeof(bvhNode{}))
 }
 
 // Occluded reports whether any world triangle lies on the segment between two

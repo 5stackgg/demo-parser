@@ -427,7 +427,8 @@ func (s *state) ensureMesh() {
 	}
 	s.mesh = mesh
 	if s.mesh != nil {
-		fmt.Fprintf(os.Stderr, "[geometry] loaded mesh for %s (%d triangles)\n", s.res.MapName, s.mesh.Triangles())
+		fmt.Fprintf(os.Stderr, "[geometry] loaded mesh for %s (%d triangles, %.1f MiB)\n",
+			s.res.MapName, s.mesh.Triangles(), float64(s.mesh.Bytes())/(1<<20))
 	} else {
 		fmt.Fprintf(os.Stderr, "[geometry] no mesh for %s — sightline validation disabled\n", s.res.MapName)
 	}

@@ -31,8 +31,18 @@ func (m *Mesh) build() {
 	if len(m.tris) == 0 {
 		return
 	}
-	m.nodes = make([]bvhNode, 0, 2*len(m.tris))
+	// A median split stops at bvhLeafSize and never emits a leaf smaller than
+	// two triangles (a node of five splits into two and three), so the tree
+	// holds at most len(tris)-1 nodes and in practice about 2/3 of that.
+	// Reserve for the typical case and let append cover the rest.
+	m.nodes = make([]bvhNode, 0, len(m.tris)*3/4)
 	m.buildNode(0, len(m.tris), 0)
+	// The mesh is cached for the process lifetime, so trailing capacity is not
+	// slack — it is resident memory that nothing will ever write to. Copy into
+	// an exact-fit slice and let the oversized one go.
+	if cap(m.nodes)-len(m.nodes) > len(m.nodes)/8 {
+		m.nodes = append(make([]bvhNode, 0, len(m.nodes)), m.nodes...)
+	}
 }
 
 func (m *Mesh) buildNode(start, end, depth int) int {
@@ -54,17 +64,27 @@ func (m *Mesh) buildNode(start, end, depth int) int {
 	} else if ez > ex && ez >= ey {
 		axis = 2
 	}
+	// Sort on the centroid, which needs no stored field: the mean of the three
+	// corners collapses to v0 plus a third of the two edges, since
+	// (v0 + (v0+e1) + (v0+e2))/3 == v0 + (e1+e2)/3. It is only ever a sort key,
+	// so computing it at the stored float32 width is fine. One comparator per
+	// axis rather than a switch inside the hot one — this runs O(n log n) times
+	// per node, at every level of the tree.
 	sub := m.tris[start:end]
-	sort.Slice(sub, func(i, j int) bool {
-		switch axis {
-		case 0:
-			return sub[i].cx < sub[j].cx
-		case 1:
-			return sub[i].cy < sub[j].cy
-		default:
-			return sub[i].cz < sub[j].cz
-		}
-	})
+	switch axis {
+	case 0:
+		sort.Slice(sub, func(i, j int) bool {
+			return sub[i].v0.X+(sub[i].e1.X+sub[i].e2.X)/3 < sub[j].v0.X+(sub[j].e1.X+sub[j].e2.X)/3
+		})
+	case 1:
+		sort.Slice(sub, func(i, j int) bool {
+			return sub[i].v0.Y+(sub[i].e1.Y+sub[i].e2.Y)/3 < sub[j].v0.Y+(sub[j].e1.Y+sub[j].e2.Y)/3
+		})
+	default:
+		sort.Slice(sub, func(i, j int) bool {
+			return sub[i].v0.Z+(sub[i].e1.Z+sub[i].e2.Z)/3 < sub[j].v0.Z+(sub[j].e1.Z+sub[j].e2.Z)/3
+		})
+	}
 	mid := start + (end-start)/2
 	node.left = m.buildNode(start, mid, depth+1)
 	node.right = m.buildNode(mid, end, depth+1)
@@ -74,15 +94,59 @@ func (m *Mesh) buildNode(start, end, depth int) int {
 	return idx
 }
 
+// triBounds is the AABB over a run of triangles. It runs once per BVH node, so
+// it sees every triangle at every level of the tree — hot enough that the
+// corners are recovered inline and compared with plain branches rather than
+// math.Min/Max, which are real calls (they have to honour NaN) and dominated
+// the build when this was written the obvious way.
+//
+// The corners are recovered at full width, the same way rayTriangle does it, so
+// the box can never round inward and clip a triangle it is meant to contain.
 func triBounds(ts []triangle) (r3.Vector, r3.Vector) {
 	mn := r3.Vector{X: math.Inf(1), Y: math.Inf(1), Z: math.Inf(1)}
 	mx := r3.Vector{X: math.Inf(-1), Y: math.Inf(-1), Z: math.Inf(-1)}
 	for i := range ts {
 		t := &ts[i]
-		mn.X, mn.Y, mn.Z = math.Min(mn.X, t.min.X), math.Min(mn.Y, t.min.Y), math.Min(mn.Z, t.min.Z)
-		mx.X, mx.Y, mx.Z = math.Max(mx.X, t.max.X), math.Max(mx.Y, t.max.Y), math.Max(mx.Z, t.max.Z)
+		x0, y0, z0 := float64(t.v0.X), float64(t.v0.Y), float64(t.v0.Z)
+		x1, y1, z1 := x0+float64(t.e1.X), y0+float64(t.e1.Y), z0+float64(t.e1.Z)
+		x2, y2, z2 := x0+float64(t.e2.X), y0+float64(t.e2.Y), z0+float64(t.e2.Z)
+
+		mn.X, mx.X = lo(mn.X, x0, x1, x2), hi(mx.X, x0, x1, x2)
+		mn.Y, mx.Y = lo(mn.Y, y0, y1, y2), hi(mx.Y, y0, y1, y2)
+		mn.Z, mx.Z = lo(mn.Z, z0, z1, z2), hi(mx.Z, z0, z1, z2)
 	}
 	return mn, mx
+}
+
+// lo and hi are the running min/max over a triangle's three corners. They exist
+// instead of math.Min/Max, and instead of the builtin min/max, because both of
+// those carry NaN semantics that cost a branch per call; mesh coordinates are
+// never NaN (buildMesh reads them straight out of the .tri) and this is the
+// hottest loop in the build.
+func lo(acc, a, b, c float64) float64 {
+	if a < acc {
+		acc = a
+	}
+	if b < acc {
+		acc = b
+	}
+	if c < acc {
+		acc = c
+	}
+	return acc
+}
+
+func hi(acc, a, b, c float64) float64 {
+	if a > acc {
+		acc = a
+	}
+	if b > acc {
+		acc = b
+	}
+	if c > acc {
+		acc = c
+	}
+	return acc
 }
 
 // slabHit is the ray/AABB overlap test over the parametric range [t0, t1].
