@@ -19,9 +19,8 @@ const endEps = 2.0
 
 // vec3 mirrors the .tri wire precision (little-endian float32), so storing a
 // triangle costs no accuracy over the source data. A competitive map runs to
-// half a million triangles and the cache holds several maps at once, so the
-// 12 bytes saved per vector over r3.Vector is tens of MB per mesh. Ray math
-// widens back to float64.
+// half a million triangles, so the 12 bytes saved per vector over r3.Vector is
+// tens of MB on a single mesh. Ray math widens back to float64.
 type vec3 struct{ X, Y, Z float32 }
 
 func newVec3(v r3.Vector) vec3 {
@@ -30,21 +29,30 @@ func newVec3(v r3.Vector) vec3 {
 
 // triangle carries only what rayTriangle reads. Bounds and centroids are
 // needed just once, while the BVH is being built, and are cheap to recover
-// from the edges (see triBounds and the split in bvh.go) — storing them would
+// from the corners (see triBounds and the split in bvh.go) — storing them would
 // quadruple the resident size of every mesh for the life of the process.
+//
+// The corners are stored rather than the Möller–Trumbore edges, even though
+// that means subtracting on every ray test. Storing narrowed edges is what
+// breaks a mesh open: two triangles sharing an edge derive it from their own
+// origins, so each rounds it slightly differently and the shared boundary stops
+// being one line. Rays then slip between two touching walls. Corners are shared
+// bit-for-bit, so the edges recovered below are identical from either side —
+// and since a corner is float32 to begin with, the float64 difference is exact.
 type triangle struct {
-	v0     vec3
-	e1, e2 vec3 // v1-v0, v2-v0 (precomputed for Möller–Trumbore)
+	v0, v1, v2 vec3
 }
 
 func newTriangle(a, b, c r3.Vector) triangle {
-	// Subtract at full width, then narrow: differencing after the narrowing
-	// would compound both operands' rounding into the edge.
-	return triangle{
-		v0: newVec3(a),
-		e1: newVec3(r3.Vector{X: b.X - a.X, Y: b.Y - a.Y, Z: b.Z - a.Z}),
-		e2: newVec3(r3.Vector{X: c.X - a.X, Y: c.Y - a.Y, Z: c.Z - a.Z}),
-	}
+	return triangle{v0: newVec3(a), v1: newVec3(b), v2: newVec3(c)}
+}
+
+// corners returns the triangle's three vertices at full width. The widening is
+// exact, so callers see precisely the coordinates the .tri file carried.
+func (t *triangle) corners() (x0, y0, z0, x1, y1, z1, x2, y2, z2 float64) {
+	return float64(t.v0.X), float64(t.v0.Y), float64(t.v0.Z),
+		float64(t.v1.X), float64(t.v1.Y), float64(t.v1.Z),
+		float64(t.v2.X), float64(t.v2.Y), float64(t.v2.Z)
 }
 
 // rayTriangle returns the parametric distance t (point = orig + t*dir) of the
@@ -52,10 +60,12 @@ func newTriangle(a, b, c r3.Vector) triangle {
 // ray misses or is parallel.
 func rayTriangle(orig, dir r3.Vector, tr *triangle) (float64, bool) {
 	const eps = 1e-9
-	// Widen the stored float32 edges once; the rest of the test runs at full
-	// width so the determinant and barycentrics keep their usual conditioning.
-	e1x, e1y, e1z := float64(tr.e1.X), float64(tr.e1.Y), float64(tr.e1.Z)
-	e2x, e2y, e2z := float64(tr.e2.X), float64(tr.e2.Y), float64(tr.e2.Z)
+	// Recover the edges at full width. Both operands are float32, so each
+	// difference is exact — every triangle sharing this edge computes the same
+	// one, and the rest of the test keeps its usual conditioning.
+	x0, y0, z0, x1, y1, z1, x2, y2, z2 := tr.corners()
+	e1x, e1y, e1z := x1-x0, y1-y0, z1-z0
+	e2x, e2y, e2z := x2-x0, y2-y0, z2-z0
 	// p = dir × e2
 	px := dir.Y*e2z - dir.Z*e2y
 	py := dir.Z*e2x - dir.X*e2z
@@ -65,9 +75,9 @@ func rayTriangle(orig, dir r3.Vector, tr *triangle) (float64, bool) {
 		return 0, false // parallel
 	}
 	inv := 1.0 / det
-	tx := orig.X - float64(tr.v0.X)
-	ty := orig.Y - float64(tr.v0.Y)
-	tz := orig.Z - float64(tr.v0.Z)
+	tx := orig.X - x0
+	ty := orig.Y - y0
+	tz := orig.Z - z0
 	u := (tx*px + ty*py + tz*pz) * inv
 	if u < 0 || u > 1 {
 		return 0, false

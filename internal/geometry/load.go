@@ -129,17 +129,26 @@ func Load(mapName string) (*Mesh, error) {
 	cacheMu.Unlock()
 	c.once.Do(func() { c.mesh, c.err = fetchAndBuild(key) })
 
-	// Registered after the build so a mesh can never evict itself while it is
-	// the one being loaded, and so failed/absent meshes never displace a real
-	// one. An entry evicted between the lookup above and here is simply built
-	// again next time — the caller still gets a valid mesh.
-	if c.mesh != nil {
-		cacheMu.Lock()
+	cacheMu.Lock()
+	switch {
+	case c.err != nil:
+		// Drop failed attempts so the next parse retries. A memoized error is a
+		// sync.Once that can never run again: one CDN timeout would otherwise
+		// disable sightline validation for that map until the pod restarts.
+		// A 404 is not an error — that returns (nil, nil) and stays memoized.
+		if cache[key] == c {
+			delete(cache, key)
+		}
+	case c.mesh != nil:
+		// Registered after the build so a mesh can never evict itself while it
+		// is the one being loaded, and so absent meshes never displace a real
+		// one. An entry evicted between the lookup above and here is simply
+		// built again next time — the caller still gets a valid mesh.
 		if cache[key] == c {
 			touch(key)
 		}
-		cacheMu.Unlock()
 	}
+	cacheMu.Unlock()
 	return c.mesh, c.err
 }
 

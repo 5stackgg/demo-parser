@@ -3,6 +3,7 @@ package geometry
 import (
 	"encoding/binary"
 	"math"
+	"math/rand"
 	"testing"
 	"unsafe"
 
@@ -157,25 +158,76 @@ func TestTriangleStaysSmall(t *testing.T) {
 	}
 }
 
+// spreadOn builds n triangles strung out along one axis, so the median split
+// picks that axis and exercises that axis's comparator.
+func spreadOn(axis, n int) *Mesh {
+	verts := make([][3]r3.Vector, 0, n)
+	for i := 0; i < n; i++ {
+		d := float64(i)
+		at := func(u, v float64) r3.Vector {
+			switch axis {
+			case 0:
+				return r3.Vector{X: d, Y: u, Z: v}
+			case 1:
+				return r3.Vector{X: u, Y: d, Z: v}
+			default:
+				return r3.Vector{X: u, Y: v, Z: d}
+			}
+		}
+		verts = append(verts, [3]r3.Vector{at(0, 0), at(1, 0), at(1, 1)})
+	}
+	return meshFromTris(verts...)
+}
+
 func TestBVHDoesNotOverReserve(t *testing.T) {
-	// Enough triangles that the tree is deep enough for the reservation to
-	// matter, laid out so the median split has real work to do.
-	var verts [][3]r3.Vector
-	for i := 0; i < 4000; i++ {
-		x := float64(i)
-		verts = append(verts, [3]r3.Vector{
-			{X: x, Y: 0, Z: 0},
-			{X: x, Y: 1, Z: 0},
-			{X: x, Y: 1, Z: 1},
-		})
+	// Every axis: the split has one comparator per axis, and a copy-paste slip
+	// in one of them yields a valid but badly split tree — no test would fail,
+	// the ray queries would just quietly get slower. Triangle counts are chosen
+	// to straddle the node-count ratio, which peaks at 4/5 near n = 5·2^k.
+	for _, n := range []int{4000, 5120, 10240, 20480} {
+		for axis := 0; axis < 3; axis++ {
+			m := spreadOn(axis, n)
+			if slack := cap(m.nodes) - len(m.nodes); slack > len(m.nodes)/8 {
+				t.Errorf("n=%d axis=%d: %d nodes in a slice of cap %d — %d wasted",
+					n, axis, len(m.nodes), cap(m.nodes), slack)
+			}
+			// The reservation must never have had to grow mid-build.
+			if len(m.nodes) > len(m.tris)*4/5+1 {
+				t.Errorf("n=%d axis=%d: %d nodes exceeds the 4/5 reservation for %d triangles",
+					n, axis, len(m.nodes), len(m.tris))
+			}
+			if len(m.nodes) == 0 {
+				t.Fatalf("n=%d axis=%d: no BVH was built", n, axis)
+			}
+		}
 	}
-	m := meshFromTris(verts...)
-	if slack := cap(m.nodes) - len(m.nodes); slack > len(m.nodes)/8 {
-		t.Fatalf("BVH holds %d nodes in a slice of cap %d — %d wasted", len(m.nodes), cap(m.nodes), slack)
-	}
-	// Sanity: the tree really did get built, and is the size the reservation assumes.
-	if len(m.nodes) == 0 || len(m.nodes) >= len(m.tris) {
-		t.Fatalf("expected under %d nodes for %d triangles, got %d", len(m.tris), len(m.tris), len(m.nodes))
+}
+
+// The median split must actually partition on each axis, not just compile. A
+// comparator reading the wrong field still builds a correct tree, so this
+// checks the tree is *tight*: a well-split run of triangles gives leaves whose
+// boxes are small along the spread axis.
+func TestSplitPartitionsOnEachAxis(t *testing.T) {
+	const n = 4096
+	for axis := 0; axis < 3; axis++ {
+		m := spreadOn(axis, n)
+		widest := 0.0
+		for i := range m.nodes {
+			if m.nodes[i].left >= 0 {
+				continue // internal
+			}
+			e := m.nodes[i].max.Sub(m.nodes[i].min)
+			w := []float64{e.X, e.Y, e.Z}[axis]
+			if w > widest {
+				widest = w
+			}
+		}
+		// Leaves hold ~4 of n triangles spaced one unit apart, so a leaf that
+		// split on the right axis spans a handful of units, not the full range.
+		if widest > 16 {
+			t.Errorf("axis=%d: widest leaf spans %.0f units of a %d-unit range — "+
+				"the split is not partitioning on this axis", axis, widest, n)
+		}
 	}
 }
 
@@ -220,13 +272,70 @@ func TestOcclusionAtMapScaleCoordinates(t *testing.T) {
 	}
 }
 
+// Adjacent triangles must agree on the geometry they share, bit for bit. They
+// do because the corners are what is stored: narrow a vertex and every triangle
+// holding it narrows it the same way. Store the Möller–Trumbore edges instead
+// and each triangle derives the shared edge from its own origin, rounding it
+// differently — the two walls stop meeting exactly and rays slip through the
+// gap. Measured at map scale that leaked ~28% of rays fired along a shared
+// edge, against ~8% for the ideal, so this is the invariant that keeps the
+// float32 storage honest.
+func TestSharedGeometryIsIdenticalFromBothSides(t *testing.T) {
+	// Two triangles of a quad, deliberately built from different first
+	// vertices and in different winding orders, sharing the edge (b, c).
+	b := r3.Vector{X: 0, Y: -2999.7331, Z: 1999.113}
+	c := r3.Vector{X: 0, Y: 3001.229, Z: -1500.577}
+	t1 := newTriangle(r3.Vector{X: 0, Y: -4000.31, Z: -4000.77}, b, c)
+	t2 := newTriangle(r3.Vector{X: 0, Y: 4000.13, Z: 4000.91}, c, b)
+
+	// t1 holds (b, c) as (v1, v2); t2 holds them as (v2, v1).
+	if t1.v1 != t2.v2 {
+		t.Errorf("shared vertex b differs between adjacent triangles: %+v vs %+v", t1.v1, t2.v2)
+	}
+	if t1.v2 != t2.v1 {
+		t.Errorf("shared vertex c differs between adjacent triangles: %+v vs %+v", t1.v2, t2.v1)
+	}
+
+	// And behaviourally: firing along the seam of a two-triangle wall must not
+	// find a way through. One configuration proves nothing — whether a given
+	// seam happens to round open is luck — so sweep a fixed set of them.
+	rng := rand.New(rand.NewSource(42))
+	q := func(v float64) float64 { return float64(float32(v)) } // as a .tri stores it
+	leaks, rays := 0, 0
+	for cfg := 0; cfg < 40; cfg++ {
+		p := func() r3.Vector {
+			return r3.Vector{X: 0, Y: q((rng.Float64() - 0.5) * 16000), Z: q((rng.Float64() - 0.5) * 16000)}
+		}
+		bb, cc, a1, a2 := p(), p(), p(), p()
+		m := meshFromTris([3]r3.Vector{a1, bb, cc}, [3]r3.Vector{a2, cc, bb})
+		const samples = 501
+		for i := 0; i < samples; i++ {
+			f := float64(i) / float64(samples-1)
+			y := bb.Y + (cc.Y-bb.Y)*f
+			z := bb.Z + (cc.Z-bb.Z)*f
+			rays++
+			if !m.Occluded(r3.Vector{X: -50, Y: y, Z: z}, r3.Vector{X: 50, Y: y, Z: z}) {
+				leaks++
+			}
+		}
+	}
+	// Möller–Trumbore rejects a ray landing exactly on a shared boundary from
+	// both sides, so even ideal geometry leaks along the seam — about 8% of
+	// rays aimed straight down it. Storing narrowed edges instead of corners
+	// measured ~28%. The threshold sits between the two.
+	if pct := 100 * float64(leaks) / float64(rays); pct > 15 {
+		t.Errorf("%.1f%% of rays along shared edges (%d/%d) passed through a solid wall — "+
+			"adjacent triangles are not meeting exactly", pct, leaks, rays)
+	}
+}
+
 func TestNormalizeMapName(t *testing.T) {
 	cases := map[string]string{
-		"de_mirage":               "de_mirage",
-		"DE_Inferno":              "de_inferno",
-		"de_inferno_night":        "de_inferno",
+		"de_mirage":                   "de_mirage",
+		"DE_Inferno":                  "de_inferno",
+		"de_inferno_night":            "de_inferno",
 		"workshop/3070821578/de_torn": "de_torn",
-		"":                        "",
+		"":                            "",
 	}
 	for in, want := range cases {
 		if got := normalizeMapName(in); got != want {

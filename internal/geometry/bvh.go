@@ -1,8 +1,9 @@
 package geometry
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/golang/geo/r3"
 )
@@ -27,21 +28,22 @@ const (
 // build constructs the BVH, reordering m.tris in place so leaves reference
 // contiguous ranges.
 func (m *Mesh) build() {
-	m.nodes = m.nodes[:0]
 	if len(m.tris) == 0 {
+		m.nodes = nil
 		return
 	}
-	// A median split stops at bvhLeafSize and never emits a leaf smaller than
-	// two triangles (a node of five splits into two and three), so the tree
-	// holds at most len(tris)-1 nodes and in practice about 2/3 of that.
-	// Reserve for the typical case and let append cover the rest.
-	m.nodes = make([]bvhNode, 0, len(m.tris)*3/4)
+	// Node count for a median split with a bvhLeafSize cutoff peaks at 4/5 of
+	// the triangle count (worst ratio 0.79999, at n = 5·2^k), so this never has
+	// to grow mid-build. It is deliberately not the looser n-1 bound: the
+	// reservation is live memory for the length of the build.
+	m.nodes = make([]bvhNode, 0, len(m.tris)*4/5+1)
 	m.buildNode(0, len(m.tris), 0)
-	// The mesh is cached for the process lifetime, so trailing capacity is not
-	// slack — it is resident memory that nothing will ever write to. Copy into
-	// an exact-fit slice and let the oversized one go.
-	if cap(m.nodes)-len(m.nodes) > len(m.nodes)/8 {
-		m.nodes = append(make([]bvhNode, 0, len(m.nodes)), m.nodes...)
+	// The mesh is then cached for the process lifetime, so what is left over is
+	// not slack — it is resident memory nothing will ever write to. Typical
+	// trees land near half the reservation, so this copy is worth its one-time
+	// cost on every build that did not land exactly.
+	if cap(m.nodes) > len(m.nodes) {
+		m.nodes = slices.Clone(m.nodes)
 	}
 }
 
@@ -64,25 +66,25 @@ func (m *Mesh) buildNode(start, end, depth int) int {
 	} else if ez > ex && ez >= ey {
 		axis = 2
 	}
-	// Sort on the centroid, which needs no stored field: the mean of the three
-	// corners collapses to v0 plus a third of the two edges, since
-	// (v0 + (v0+e1) + (v0+e2))/3 == v0 + (e1+e2)/3. It is only ever a sort key,
-	// so computing it at the stored float32 width is fine. One comparator per
-	// axis rather than a switch inside the hot one — this runs O(n log n) times
-	// per node, at every level of the tree.
+	// Split at the median centroid. It needs no stored field — the mean of the
+	// three corners is right there — and it is only ever a sort key, so the
+	// stored float32 width is plenty. slices.SortFunc rather than sort.Slice:
+	// this runs once per internal node, and sort.Slice's reflect-based swapper
+	// allocates on every call, which across a 500k-triangle build is hundreds
+	// of thousands of allocations of pure garbage.
 	sub := m.tris[start:end]
 	switch axis {
 	case 0:
-		sort.Slice(sub, func(i, j int) bool {
-			return sub[i].v0.X+(sub[i].e1.X+sub[i].e2.X)/3 < sub[j].v0.X+(sub[j].e1.X+sub[j].e2.X)/3
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.X+a.v1.X+a.v2.X, b.v0.X+b.v1.X+b.v2.X)
 		})
 	case 1:
-		sort.Slice(sub, func(i, j int) bool {
-			return sub[i].v0.Y+(sub[i].e1.Y+sub[i].e2.Y)/3 < sub[j].v0.Y+(sub[j].e1.Y+sub[j].e2.Y)/3
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.Y+a.v1.Y+a.v2.Y, b.v0.Y+b.v1.Y+b.v2.Y)
 		})
 	default:
-		sort.Slice(sub, func(i, j int) bool {
-			return sub[i].v0.Z+(sub[i].e1.Z+sub[i].e2.Z)/3 < sub[j].v0.Z+(sub[j].e1.Z+sub[j].e2.Z)/3
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.Z+a.v1.Z+a.v2.Z, b.v0.Z+b.v1.Z+b.v2.Z)
 		})
 	}
 	mid := start + (end-start)/2
@@ -106,11 +108,7 @@ func triBounds(ts []triangle) (r3.Vector, r3.Vector) {
 	mn := r3.Vector{X: math.Inf(1), Y: math.Inf(1), Z: math.Inf(1)}
 	mx := r3.Vector{X: math.Inf(-1), Y: math.Inf(-1), Z: math.Inf(-1)}
 	for i := range ts {
-		t := &ts[i]
-		x0, y0, z0 := float64(t.v0.X), float64(t.v0.Y), float64(t.v0.Z)
-		x1, y1, z1 := x0+float64(t.e1.X), y0+float64(t.e1.Y), z0+float64(t.e1.Z)
-		x2, y2, z2 := x0+float64(t.e2.X), y0+float64(t.e2.Y), z0+float64(t.e2.Z)
-
+		x0, y0, z0, x1, y1, z1, x2, y2, z2 := ts[i].corners()
 		mn.X, mx.X = lo(mn.X, x0, x1, x2), hi(mx.X, x0, x1, x2)
 		mn.Y, mx.Y = lo(mn.Y, y0, y1, y2), hi(mx.Y, y0, y1, y2)
 		mn.Z, mx.Z = lo(mn.Z, z0, z1, z2), hi(mx.Z, z0, z1, z2)
