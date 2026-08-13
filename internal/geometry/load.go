@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,15 @@ const maxMeshBytes = 96 << 20
 // "always visible").
 const maxTriangles = 1_500_000
 
+// defaultMaxCachedMeshes bounds how many built meshes stay resident. A mesh is
+// tens of MB and a parse only ever touches the one map it is parsing, so a
+// small LRU keeps steady-state memory flat no matter how many maps pass
+// through — workshop maps in particular, since normalizeMapName turns every
+// variant into its own key and nothing else would ever release them. A miss
+// costs one re-download plus a rebuild, seconds against a 20-30s parse.
+// Override with MAP_MESH_CACHE; 0 or less disables caching entirely.
+const defaultMaxCachedMeshes = 2
+
 var client = &http.Client{Timeout: 15 * time.Second}
 
 // cached memoizes one Load attempt per normalized map name (including the
@@ -40,7 +50,48 @@ type cached struct {
 var (
 	cacheMu sync.Mutex
 	cache   = map[string]*cached{}
+	// Keys of entries holding a non-nil mesh, most recently used first. Only
+	// those count against the bound: a map with no .tri memoizes as (nil, nil)
+	// and costs nothing, so those entries stay forever and a missing mesh is
+	// still fetched at most once.
+	lru []string
 )
+
+func maxCachedMeshes() int {
+	if v, ok := os.LookupEnv("MAP_MESH_CACHE"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
+	}
+	return defaultMaxCachedMeshes
+}
+
+// touch moves key to the front of the LRU and evicts the least recently used
+// meshes past the bound. Callers must hold cacheMu.
+//
+// Eviction is only a map delete: a parse already holding the *Mesh keeps it
+// alive for as long as it needs it, and the GC reclaims it once that parse
+// finishes. Nothing here can pull a mesh out from under an in-flight parse.
+func touch(key string) {
+	for i, k := range lru {
+		if k == key {
+			lru = append(lru[:i], lru[i+1:]...)
+			break
+		}
+	}
+	lru = append([]string{key}, lru...)
+
+	max := maxCachedMeshes()
+	if max < 0 {
+		max = 0
+	}
+	for len(lru) > max {
+		evict := lru[len(lru)-1]
+		lru = lru[:len(lru)-1]
+		delete(cache, evict)
+		fmt.Fprintf(os.Stderr, "[geometry] evicted mesh for %s (%d cached)\n", evict, len(lru))
+	}
+}
 
 // normalizeMapName turns a parser map name into a .tri base name: workshop
 // maps (`workshop/123/de_x`) → `de_x`, lowercased, `_night` stripped.
@@ -62,7 +113,8 @@ func cdnBase() (string, bool) {
 
 // Load returns the collision mesh for a map, or (nil, nil) when geometry is
 // unavailable (disabled, unknown map, or no .tri published) — callers treat a
-// nil mesh as "always visible". Results are cached process-wide.
+// nil mesh as "always visible". Results are cached process-wide, bounded to
+// maxCachedMeshes built meshes.
 func Load(mapName string) (*Mesh, error) {
 	key := normalizeMapName(mapName)
 	if key == "" {
@@ -76,6 +128,27 @@ func Load(mapName string) (*Mesh, error) {
 	}
 	cacheMu.Unlock()
 	c.once.Do(func() { c.mesh, c.err = fetchAndBuild(key) })
+
+	cacheMu.Lock()
+	switch {
+	case c.err != nil:
+		// Drop failed attempts so the next parse retries. A memoized error is a
+		// sync.Once that can never run again: one CDN timeout would otherwise
+		// disable sightline validation for that map until the pod restarts.
+		// A 404 is not an error — that returns (nil, nil) and stays memoized.
+		if cache[key] == c {
+			delete(cache, key)
+		}
+	case c.mesh != nil:
+		// Registered after the build so a mesh can never evict itself while it
+		// is the one being loaded, and so absent meshes never displace a real
+		// one. An entry evicted between the lookup above and here is simply
+		// built again next time — the caller still gets a valid mesh.
+		if cache[key] == c {
+			touch(key)
+		}
+	}
+	cacheMu.Unlock()
 	return c.mesh, c.err
 }
 

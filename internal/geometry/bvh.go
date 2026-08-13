@@ -1,8 +1,9 @@
 package geometry
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/golang/geo/r3"
 )
@@ -27,12 +28,23 @@ const (
 // build constructs the BVH, reordering m.tris in place so leaves reference
 // contiguous ranges.
 func (m *Mesh) build() {
-	m.nodes = m.nodes[:0]
 	if len(m.tris) == 0 {
+		m.nodes = nil
 		return
 	}
-	m.nodes = make([]bvhNode, 0, 2*len(m.tris))
+	// Node count for a median split with a bvhLeafSize cutoff peaks at 4/5 of
+	// the triangle count (worst ratio 0.79999, at n = 5·2^k), so this never has
+	// to grow mid-build. It is deliberately not the looser n-1 bound: the
+	// reservation is live memory for the length of the build.
+	m.nodes = make([]bvhNode, 0, len(m.tris)*4/5+1)
 	m.buildNode(0, len(m.tris), 0)
+	// The mesh is then cached for the process lifetime, so what is left over is
+	// not slack — it is resident memory nothing will ever write to. Typical
+	// trees land near half the reservation, so this copy is worth its one-time
+	// cost on every build that did not land exactly.
+	if cap(m.nodes) > len(m.nodes) {
+		m.nodes = slices.Clone(m.nodes)
+	}
 }
 
 func (m *Mesh) buildNode(start, end, depth int) int {
@@ -54,17 +66,27 @@ func (m *Mesh) buildNode(start, end, depth int) int {
 	} else if ez > ex && ez >= ey {
 		axis = 2
 	}
+	// Split at the median centroid. It needs no stored field — the mean of the
+	// three corners is right there — and it is only ever a sort key, so the
+	// stored float32 width is plenty. slices.SortFunc rather than sort.Slice:
+	// this runs once per internal node, and sort.Slice's reflect-based swapper
+	// allocates on every call, which across a 500k-triangle build is hundreds
+	// of thousands of allocations of pure garbage.
 	sub := m.tris[start:end]
-	sort.Slice(sub, func(i, j int) bool {
-		switch axis {
-		case 0:
-			return sub[i].cx < sub[j].cx
-		case 1:
-			return sub[i].cy < sub[j].cy
-		default:
-			return sub[i].cz < sub[j].cz
-		}
-	})
+	switch axis {
+	case 0:
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.X+a.v1.X+a.v2.X, b.v0.X+b.v1.X+b.v2.X)
+		})
+	case 1:
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.Y+a.v1.Y+a.v2.Y, b.v0.Y+b.v1.Y+b.v2.Y)
+		})
+	default:
+		slices.SortFunc(sub, func(a, b triangle) int {
+			return cmp.Compare(a.v0.Z+a.v1.Z+a.v2.Z, b.v0.Z+b.v1.Z+b.v2.Z)
+		})
+	}
 	mid := start + (end-start)/2
 	node.left = m.buildNode(start, mid, depth+1)
 	node.right = m.buildNode(mid, end, depth+1)
@@ -74,15 +96,55 @@ func (m *Mesh) buildNode(start, end, depth int) int {
 	return idx
 }
 
+// triBounds is the AABB over a run of triangles. It runs once per BVH node, so
+// it sees every triangle at every level of the tree — hot enough that the
+// corners are recovered inline and compared with plain branches rather than
+// math.Min/Max, which are real calls (they have to honour NaN) and dominated
+// the build when this was written the obvious way.
+//
+// The corners are recovered at full width, the same way rayTriangle does it, so
+// the box can never round inward and clip a triangle it is meant to contain.
 func triBounds(ts []triangle) (r3.Vector, r3.Vector) {
 	mn := r3.Vector{X: math.Inf(1), Y: math.Inf(1), Z: math.Inf(1)}
 	mx := r3.Vector{X: math.Inf(-1), Y: math.Inf(-1), Z: math.Inf(-1)}
 	for i := range ts {
-		t := &ts[i]
-		mn.X, mn.Y, mn.Z = math.Min(mn.X, t.min.X), math.Min(mn.Y, t.min.Y), math.Min(mn.Z, t.min.Z)
-		mx.X, mx.Y, mx.Z = math.Max(mx.X, t.max.X), math.Max(mx.Y, t.max.Y), math.Max(mx.Z, t.max.Z)
+		x0, y0, z0, x1, y1, z1, x2, y2, z2 := ts[i].corners()
+		mn.X, mx.X = lo(mn.X, x0, x1, x2), hi(mx.X, x0, x1, x2)
+		mn.Y, mx.Y = lo(mn.Y, y0, y1, y2), hi(mx.Y, y0, y1, y2)
+		mn.Z, mx.Z = lo(mn.Z, z0, z1, z2), hi(mx.Z, z0, z1, z2)
 	}
 	return mn, mx
+}
+
+// lo and hi are the running min/max over a triangle's three corners. They exist
+// instead of math.Min/Max, and instead of the builtin min/max, because both of
+// those carry NaN semantics that cost a branch per call; mesh coordinates are
+// never NaN (buildMesh reads them straight out of the .tri) and this is the
+// hottest loop in the build.
+func lo(acc, a, b, c float64) float64 {
+	if a < acc {
+		acc = a
+	}
+	if b < acc {
+		acc = b
+	}
+	if c < acc {
+		acc = c
+	}
+	return acc
+}
+
+func hi(acc, a, b, c float64) float64 {
+	if a > acc {
+		acc = a
+	}
+	if b > acc {
+		acc = b
+	}
+	if c > acc {
+		acc = c
+	}
+	return acc
 }
 
 // slabHit is the ray/AABB overlap test over the parametric range [t0, t1].
