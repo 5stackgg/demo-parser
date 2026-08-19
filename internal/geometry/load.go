@@ -20,6 +20,16 @@ import (
 // empty to disable geometry entirely (offline / tests).
 const defaultMeshCDN = "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-4"
 
+// The mesh sets are published as tagged snapshots of one GitHub repo and
+// served through jsDelivr, so a revision is fully identified by its tag. These
+// let a caller name a revision other than the process default — which is what
+// drift detection needs, since it has to hold the mesh from before a map patch
+// and the one from after it at the same time.
+const (
+	defaultMeshOwner = "5stackgg"
+	defaultMeshRepo  = "5stackgg/replay-map-meshes"
+)
+
 // maxMeshBytes caps a downloaded .tri, matching the web's MAX_MESH_BYTES.
 const maxMeshBytes = 96 << 20
 
@@ -89,7 +99,9 @@ func touch(key string) {
 		evict := lru[len(lru)-1]
 		lru = lru[:len(lru)-1]
 		delete(cache, evict)
-		fmt.Fprintf(os.Stderr, "[geometry] evicted mesh for %s (%d cached)\n", evict, len(lru))
+		// The key is base + "\n" + map; only the map half is worth logging.
+		_, name, _ := strings.Cut(evict, "\n")
+		fmt.Fprintf(os.Stderr, "[geometry] evicted mesh for %s (%d cached)\n", name, len(lru))
 	}
 }
 
@@ -111,15 +123,93 @@ func cdnBase() (string, bool) {
 	return defaultMeshCDN, true
 }
 
+// MaxCachedMeshes reports the bound the mesh cache is running under, so a
+// caller that needs more than one mesh resident at a time (drift detection
+// holds two) can warn when the deployment is configured for fewer.
+func MaxCachedMeshes() int {
+	return maxCachedMeshes()
+}
+
+// ResolveMeshRevision turns a mesh reference into the base URL its .tri files
+// live under. Accepted forms, most to least specific:
+//
+//	"https://host/path"                       used verbatim (mirrors, tests)
+//	"5stackgg/replay-map-meshes@17595823-5"   owner, repo and tag
+//	"replay-map-meshes@17595823-5"            default owner
+//	"17595823-5"                              default owner and repo
+//	""                                        the process default (MAP_MESH_CDN)
+//
+// A reference is part of a request body, so the repo and tag are charset-
+// checked rather than pasted into a URL: a "tag" containing a slash or a dot
+// segment would otherwise walk out of the pinned path and fetch something else
+// entirely.
+func ResolveMeshRevision(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		base, _ := cdnBase()
+		return strings.TrimRight(base, "/"), nil
+	}
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return strings.TrimRight(ref, "/"), nil
+	}
+	repo, tag := defaultMeshRepo, ref
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		repo, tag = ref[:i], ref[i+1:]
+		if !strings.Contains(repo, "/") {
+			repo = defaultMeshOwner + "/" + repo
+		}
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || !safeRefPart(owner) || !safeRefPart(name) || !safeRefPart(tag) {
+		return "", fmt.Errorf("mesh revision %q is not a tag, owner/repo@tag, or an http(s) base", ref)
+	}
+	return "https://cdn.jsdelivr.net/gh/" + owner + "/" + name + "@" + tag, nil
+}
+
+func safeRefPart(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// LoadRevision is Load against a named mesh revision rather than the process
+// default. Two revisions of the same map are separate cache entries, so both
+// can be resident at once — mind MaxCachedMeshes when they are.
+func LoadRevision(mapName, revision string) (*Mesh, error) {
+	base, err := ResolveMeshRevision(revision)
+	if err != nil {
+		return nil, err
+	}
+	return loadFrom(base, mapName)
+}
+
 // Load returns the collision mesh for a map, or (nil, nil) when geometry is
 // unavailable (disabled, unknown map, or no .tri published) — callers treat a
 // nil mesh as "always visible". Results are cached process-wide, bounded to
 // maxCachedMeshes built meshes.
 func Load(mapName string) (*Mesh, error) {
-	key := normalizeMapName(mapName)
-	if key == "" {
+	base, _ := cdnBase()
+	return loadFrom(strings.TrimRight(base, "/"), mapName)
+}
+
+// loadFrom is Load against an already-resolved base. The cache key carries the
+// base as well as the map, so the same map at two revisions never collides —
+// the whole point of drift detection is that those two meshes differ.
+func loadFrom(base, mapName string) (*Mesh, error) {
+	name := normalizeMapName(mapName)
+	if name == "" {
 		return nil, nil
 	}
+	key := base + "\n" + name
 	cacheMu.Lock()
 	c := cache[key]
 	if c == nil {
@@ -127,7 +217,7 @@ func Load(mapName string) (*Mesh, error) {
 		cache[key] = c
 	}
 	cacheMu.Unlock()
-	c.once.Do(func() { c.mesh, c.err = fetchAndBuild(key) })
+	c.once.Do(func() { c.mesh, c.err = fetchAndBuild(base, name) })
 
 	cacheMu.Lock()
 	switch {
@@ -152,8 +242,7 @@ func Load(mapName string) (*Mesh, error) {
 	return c.mesh, c.err
 }
 
-func fetchAndBuild(key string) (*Mesh, error) {
-	base, _ := cdnBase()
+func fetchAndBuild(base, key string) (*Mesh, error) {
 	if base == "" {
 		return nil, nil // geometry disabled
 	}

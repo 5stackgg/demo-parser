@@ -143,6 +143,14 @@ type state struct {
 	// per-tick FrameDone events down to ~4Hz for the 2D replay table.
 	lastPositionSampleTick int
 
+	// Full-rate position rows for the last throwBurstTicks ticks, indexed by
+	// tick modulo its length, so a grenade throw can emit the ticks that came
+	// before it. burstUntilTick is the last tick of the window ahead of the
+	// most recent throw.
+	posRing        [throwBurstTicks + 1]positionSample
+	burstUntilTick int
+	positionBursts int
+
 	// Grenade projectile last-known positions, keyed by entity id.
 	// demoinfocs' GrenadeEvent.Position is stale or zeroed for some
 	// CS2 demos; tracking the projectile entity's own Position() each
@@ -257,6 +265,7 @@ func (s *state) registerHandlers() {
 // come from packets observed during ParseToEnd, so this runs even on
 // partial parses.
 func (s *state) finalize() {
+	s.res.SchemaVersion = SchemaVersion
 	if rate := s.parser.TickRate(); rate > 0 {
 		s.res.TickRate = rate
 	}
@@ -338,6 +347,11 @@ func (s *state) finalize() {
 	)
 
 	s.computeTrades()
+
+	if s.sortPositions() {
+		fmt.Fprintf(os.Stderr, "[positions] rows=%d throw_bursts=%d\n",
+			len(s.res.Positions), s.positionBursts)
+	}
 
 	gids := make([]int, 0, len(s.grenadePaths))
 	for gid := range s.grenadePaths {

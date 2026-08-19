@@ -203,6 +203,11 @@ type EventInferno struct {
 // EventPosition is a low-frequency (~4Hz) sample of a single player's
 // world position + view yaw. The replay viewer interpolates between
 // adjacent samples to render a 2D radar timeline.
+//
+// The exception is the window around a grenade throw, where every tick is
+// emitted (see throwBurstTicks). Rows stay sorted by tick, so a consumer
+// walking the array in order still sees a timeline; the sample interval is
+// just not constant.
 type EventPosition struct {
 	Tick            int     `json:"tick"`
 	Round           int     `json:"round,omitempty"`
@@ -240,6 +245,14 @@ type EventPosition struct {
 	// knife, or a grenade mid-throw — rather than the static loadout.
 	// Empty when unarmed (dead / nothing equipped).
 	ActiveWeapon string `json:"active_weapon,omitempty"`
+	// Ducked is the engine's FL_DUCKING flag: the player is fully crouched,
+	// eyes at ~46 units rather than ~64. A crouch still animating reads as
+	// standing, matching EventShotFired.IsCrouched.
+	//
+	// Without it a lineup mined out of a demo cannot state its own technique —
+	// stand vs crouch moves the release point by 18 units and lands the smoke
+	// somewhere else entirely.
+	Ducked bool `json:"ducked,omitempty"`
 }
 
 type EventFlash struct {
@@ -345,8 +358,8 @@ type PlayerTrade struct {
 }
 
 type PlayerInfo struct {
-	SteamID string `json:"steam_id"`
-	Name    string `json:"name"`
+	SteamID      string `json:"steam_id"`
+	Name         string `json:"name"`
 	StartingSide string `json:"starting_side,omitempty"`
 	Rank         int    `json:"rank,omitempty"`
 	RankType     int    `json:"rank_type,omitempty"`
@@ -354,11 +367,26 @@ type PlayerInfo struct {
 	WinCount     int    `json:"win_count,omitempty"`
 }
 
+// SchemaVersion identifies the shape of the Result blob. The API and the web
+// replay both read it, so bump it whenever a field they consume is added,
+// removed, or changes meaning, and say what changed here.
+//
+//	1 — everything up to and including smoke volumes and infernos. Blobs from
+//	    before this constant existed carry no schema_version at all and are
+//	    version 1 by definition.
+//	2 — EventPosition.ducked, and a full-rate burst of positions in a ±10 tick
+//	    window around every grenade throw (the sample interval is no longer a
+//	    constant ~4Hz; rows remain sorted by tick).
+const SchemaVersion = 2
+
 type Result struct {
-	TotalTicks int     `json:"total_ticks"`
-	TickRate   float64 `json:"tick_rate"`
-	MapName    string  `json:"map_name"`
-	WorkshopID string  `json:"workshop_id,omitempty"`
+	// SchemaVersion is always emitted, including at its zero value, so a
+	// consumer can tell "old blob" from "field I forgot to read".
+	SchemaVersion int     `json:"schema_version"`
+	TotalTicks    int     `json:"total_ticks"`
+	TickRate      float64 `json:"tick_rate"`
+	MapName       string  `json:"map_name"`
+	WorkshopID    string  `json:"workshop_id,omitempty"`
 	// GeometryValidated is true when a collision mesh was available for this
 	// map, so the LOS-gated spotted/engagement stats are validated rather
 	// than estimated. Emitted even when false (no omitempty) so consumers can

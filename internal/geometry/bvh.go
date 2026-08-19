@@ -219,9 +219,22 @@ func (m *Mesh) anyHit(orig, dir r3.Vector, tmin, tmax float64) bool {
 
 // nearestHit returns the closest triangle distance along a (unit) ray.
 func (m *Mesh) nearestHit(orig, dir r3.Vector) (float64, bool) {
+	t, _, ok := m.nearestHitTri(orig, dir)
+	return t, ok
+}
+
+// nearestHitTri is nearestHit plus the triangle that produced the hit, for
+// callers that need the surface (its normal) and not just the range to it.
+//
+// Ties are broken by traversal order rather than arbitrarily: `<` keeps the
+// first triangle found at a given distance, and the traversal itself is a
+// fixed stack walk over a deterministically built tree. Two processes loading
+// the same .tri therefore pick the same triangle, which is what lets a
+// simulation run against two meshes be compared at all.
+func (m *Mesh) nearestHitTri(orig, dir r3.Vector) (float64, *triangle, bool) {
 	inv := r3.Vector{X: safeInv(dir.X), Y: safeInv(dir.Y), Z: safeInv(dir.Z)}
 	best := math.Inf(1)
-	found := false
+	var hit *triangle
 	stack := make([]int, 0, 64)
 	stack = append(stack, 0)
 	for len(stack) > 0 {
@@ -235,12 +248,12 @@ func (m *Mesh) nearestHit(orig, dir r3.Vector) (float64, bool) {
 			for i := n.start; i < n.start+n.count; i++ {
 				if t, ok := rayTriangle(orig, dir, &m.tris[i]); ok && t > 1e-4 && t < best {
 					best = t
-					found = true
+					hit = &m.tris[i]
 				}
 			}
 			continue
 		}
 		stack = append(stack, n.left, n.right)
 	}
-	return best, found
+	return best, hit, hit != nil
 }

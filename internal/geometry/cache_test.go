@@ -232,3 +232,88 @@ func TestCacheCanBeDisabled(t *testing.T) {
 		t.Errorf("the entry map should be empty too when disabled, holds %d", got)
 	}
 }
+
+func TestResolveMeshRevision(t *testing.T) {
+	t.Setenv("MAP_MESH_CDN", "https://example.test/pinned/")
+	for ref, want := range map[string]string{
+		"":                                      "https://example.test/pinned",
+		"https://mirror.test/meshes/":           "https://mirror.test/meshes",
+		"http://127.0.0.1:8080":                 "http://127.0.0.1:8080",
+		"17595823-5":                            "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
+		"replay-map-meshes@17595823-5":          "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
+		"5stackgg/replay-map-meshes@17595823-5": "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
+		"someone-else/other-meshes@v1.2.3":      "https://cdn.jsdelivr.net/gh/someone-else/other-meshes@v1.2.3",
+	} {
+		got, err := ResolveMeshRevision(ref)
+		if err != nil {
+			t.Errorf("ResolveMeshRevision(%q): %v", ref, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ResolveMeshRevision(%q) = %q, want %q", ref, got, want)
+		}
+	}
+	// A revision comes off a request body, so anything that could walk out of
+	// the pinned path has to be refused rather than pasted into a URL.
+	for _, bad := range []string{
+		"../../../etc", "tag/../..", "repo@tag/nested", "..", "a b", "tag?query=1",
+		"owner/repo@", "@tag", "owner/repo/extra@tag",
+	} {
+		if got, err := ResolveMeshRevision(bad); err == nil {
+			t.Errorf("ResolveMeshRevision(%q) should be refused, got %q", bad, got)
+		}
+	}
+}
+
+// Drift detection stands or falls on this: the same map at two revisions must
+// be two cache entries, or the second load would hand back the first's mesh and
+// every lineup would look unchanged.
+func TestRevisionsAreSeparateCacheEntries(t *testing.T) {
+	one := triBlob([3]r3.Vector{{X: 0, Y: -50, Z: -50}, {X: 0, Y: 50, Z: -50}, {X: 0, Y: 50, Z: 50}})
+	two := append(append([]byte(nil), one...), triBlob(
+		[3]r3.Vector{{X: 10, Y: -50, Z: -50}, {X: 10, Y: 50, Z: -50}, {X: 10, Y: 50, Z: 50}},
+		[3]r3.Vector{{X: 20, Y: -50, Z: -50}, {X: 20, Y: 50, Z: -50}, {X: 20, Y: 50, Z: 50}},
+	)...)
+
+	serve := func(blob []byte) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(blob)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	oldRev, newRev := serve(one), serve(two)
+	resetCache()
+	t.Cleanup(resetCache)
+	t.Setenv("MAP_MESH_CACHE", "4")
+
+	before, err := LoadRevision("de_x", oldRev)
+	if err != nil || before == nil {
+		t.Fatalf("LoadRevision(old) = %v, %v", before, err)
+	}
+	after, err := LoadRevision("de_x", newRev)
+	if err != nil || after == nil {
+		t.Fatalf("LoadRevision(new) = %v, %v", after, err)
+	}
+	if before == after {
+		t.Fatal("two revisions of one map came back as the same mesh")
+	}
+	if before.Triangles() != 1 || after.Triangles() != 3 {
+		t.Fatalf("wrong geometry per revision: old %d triangles, new %d",
+			before.Triangles(), after.Triangles())
+	}
+	if got := cachedMeshCount(); got != 2 {
+		t.Fatalf("both revisions should be resident, cache holds %d", got)
+	}
+	// And each is still memoized on its own key.
+	if again, _ := LoadRevision("de_x", oldRev); again != before {
+		t.Fatal("the old revision should have come back out of the cache")
+	}
+}
+
+func TestMaxCachedMeshesReportsTheBound(t *testing.T) {
+	t.Setenv("MAP_MESH_CACHE", "7")
+	if got := MaxCachedMeshes(); got != 7 {
+		t.Fatalf("MaxCachedMeshes() = %d, want 7", got)
+	}
+}
