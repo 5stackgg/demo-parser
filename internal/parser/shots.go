@@ -2,6 +2,7 @@ package parser
 
 import (
 	"math"
+	"sort"
 
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
@@ -85,15 +86,68 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	if sampleEvery < 1 {
 		sampleEvery = 1
 	}
-	if s.lastPositionSampleTick != 0 && curTick-s.lastPositionSampleTick < sampleEvery {
-		return
-	}
-	s.lastPositionSampleTick = curTick
+	// Asked before the liveRound gate below, so the ~4Hz clock keeps the phase
+	// it had before this window existed.
+	due := s.positionSampleDue(curTick, sampleEvery)
 	// Skip freezetime + end-of-round walkaround — the replay viewer
 	// auto-skips both, so persisting them is pure waste.
 	if !s.liveRound {
 		return
 	}
+	// Every live tick is captured, whether or not it is due: a grenade thrown
+	// in the next few ticks needs the ones already behind it.
+	slot := s.capturePositions(curTick)
+	if due || curTick <= s.burstUntilTick {
+		s.emitPositions(slot)
+	}
+}
+
+// throwBurstTicks is how far either side of a grenade throw positions are
+// emitted at the demo's full tick rate instead of the usual ~4Hz.
+//
+// At 4Hz the nearest sample to a release can be 125ms stale, which is about 30
+// units of drift at run speed — enough to put a mined lineup's standing spot in
+// the wrong place and its view angles on the wrong pixel. Ten ticks is 156ms at
+// 64 tick and covers the whole run-up-and-release, at a cost of ~20 extra rows
+// per player per throw.
+const throwBurstTicks = 10
+
+// positionSample is one tick's worth of position rows. Slots live in a short
+// ring so a throw can emit the ticks that came before it, and their row slices
+// are reused rather than reallocated every tick.
+type positionSample struct {
+	tick int
+	// emitted guards against a row reaching Result.Positions twice, when a
+	// due 4Hz sample and a throw window land on the same tick.
+	emitted bool
+	rows    []EventPosition
+}
+
+// positionSampleDue reports whether the ~4Hz clock has come round, advancing it
+// when it has.
+func (s *state) positionSampleDue(tick, every int) bool {
+	if s.lastPositionSampleTick != 0 && tick-s.lastPositionSampleTick < every {
+		return false
+	}
+	s.lastPositionSampleTick = tick
+	return true
+}
+
+// stagePositionSlot claims this tick's ring slot, dropping whatever tick was
+// previously in it.
+func (s *state) stagePositionSlot(tick int) *positionSample {
+	slot := &s.posRing[tick%len(s.posRing)]
+	slot.tick = tick
+	slot.emitted = false
+	slot.rows = slot.rows[:0]
+	return slot
+}
+
+// capturePositions fills this tick's ring slot with a row per playing player
+// and returns it. Nothing is emitted here.
+func (s *state) capturePositions(tick int) *positionSample {
+	slot := s.stagePositionSlot(tick)
+
 	// Bomb carrier this sample tick, if any. Match by SteamID rather
 	// than pointer — the carrier pointer is generally stable across
 	// frames in v5, but some demos churn the participants slice and
@@ -111,8 +165,8 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			continue
 		}
 		pos := p.Position()
-		s.res.Positions = append(s.res.Positions, EventPosition{
-			Tick:            curTick,
+		slot.rows = append(slot.rows, EventPosition{
+			Tick:            tick,
 			Round:           s.currentRound,
 			AttackerSteamID: sid,
 			Team:            teamCode(p.Team),
@@ -128,8 +182,58 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 			HasBomb:         carrierSID != "" && sid == carrierSID,
 			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
 			ActiveWeapon:    activeWeaponName(p),
+			Ducked:          p.IsDucking(),
 		})
 	}
+	return slot
+}
+
+func (s *state) emitPositions(slot *positionSample) {
+	if slot == nil || slot.emitted {
+		return
+	}
+	slot.emitted = true
+	s.res.Positions = append(s.res.Positions, slot.rows...)
+}
+
+// sortPositions puts the array back in tick order and reports whether it had
+// to. A throw burst emits the ticks behind it after later samples have already
+// been appended; consumers walk this array as a timeline. Stable, so the
+// per-tick block of players keeps the order it was captured in.
+func (s *state) sortPositions() bool {
+	if s.positionBursts == 0 {
+		return false
+	}
+	sort.SliceStable(s.res.Positions, func(i, j int) bool {
+		return s.res.Positions[i].Tick < s.res.Positions[j].Tick
+	})
+	return true
+}
+
+// burstPositions emits the captured window behind a grenade throw and opens the
+// window ahead of it. Overlapping throws extend the same run rather than
+// duplicating rows.
+//
+// The rows flushed here are older than what is already in Result.Positions, so
+// finalize sorts the array back into tick order.
+func (s *state) burstPositions(tick int) {
+	if !s.liveRound {
+		return
+	}
+	for t := tick - throwBurstTicks; t <= tick; t++ {
+		if t < 0 {
+			continue
+		}
+		slot := &s.posRing[t%len(s.posRing)]
+		if slot.tick != t {
+			continue // that tick has already rolled out of the ring
+		}
+		s.emitPositions(slot)
+	}
+	if until := tick + throwBurstTicks; until > s.burstUntilTick {
+		s.burstUntilTick = until
+	}
+	s.positionBursts++
 }
 
 // onWeaponFire records one row per shot. Firearms only — knife and

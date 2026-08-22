@@ -158,3 +158,56 @@ func safeInv(x float64) float64 {
 	}
 	return 1.0 / x
 }
+
+// SurfaceHit is the nearest world surface along a ray.
+type SurfaceHit struct {
+	// Distance is the range from the ray origin, in source units.
+	Distance float64
+	// Normal is the unit surface normal, always oriented back towards the ray
+	// (Normal·dir < 0). The .tri meshes are unwound — a wall's triangles can
+	// face either way — so a normal taken straight from the winding is only
+	// right half the time, and a bounce computed off a flipped one drives the
+	// grenade through the wall instead of off it.
+	Normal r3.Vector
+}
+
+// RayHitSurface returns the nearest surface along a ray (dir need not be
+// normalized), with the normal to bounce off it. ok is false when nothing is
+// hit, or when the mesh is empty.
+func (m *Mesh) RayHitSurface(origin, dir r3.Vector) (SurfaceHit, bool) {
+	if m == nil || len(m.tris) == 0 {
+		return SurfaceHit{}, false
+	}
+	l := math.Sqrt(dir.X*dir.X + dir.Y*dir.Y + dir.Z*dir.Z)
+	if l < 1e-9 {
+		return SurfaceHit{}, false
+	}
+	d := r3.Vector{X: dir.X / l, Y: dir.Y / l, Z: dir.Z / l}
+	t, tri, ok := m.nearestHitTri(origin, d)
+	if !ok {
+		return SurfaceHit{}, false
+	}
+	x0, y0, z0, x1, y1, z1, x2, y2, z2 := tri.corners()
+	e1 := r3.Vector{X: x1 - x0, Y: y1 - y0, Z: z1 - z0}
+	e2 := r3.Vector{X: x2 - x0, Y: y2 - y0, Z: z2 - z0}
+	n := e1.Cross(e2)
+	nl := n.Norm()
+	if nl < 1e-12 {
+		return SurfaceHit{}, false // degenerate triangle: no surface to bounce off
+	}
+	n = n.Mul(1 / nl)
+	if n.Dot(d) > 0 {
+		n = n.Mul(-1)
+	}
+	return SurfaceHit{Distance: t, Normal: n}, true
+}
+
+// Bounds is the mesh's world AABB, straight off the BVH root. ok is false for
+// an empty mesh. Callers use it to notice a simulation that has left the map
+// rather than integrating it forever.
+func (m *Mesh) Bounds() (min, max r3.Vector, ok bool) {
+	if m == nil || len(m.nodes) == 0 {
+		return r3.Vector{}, r3.Vector{}, false
+	}
+	return m.nodes[0].min, m.nodes[0].max, true
+}

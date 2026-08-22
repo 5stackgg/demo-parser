@@ -48,6 +48,9 @@ func (s *state) onGrenadeProjectileThrow(e events.GrenadeProjectileThrow) {
 		ev.ThrowerTeam = teamCode(thrower.Team)
 	}
 	s.res.GrenadeThrows = append(s.res.GrenadeThrows, ev)
+	// A lineup mined from this throw is only reproducible if the thrower's
+	// stance, spot and view angles at the release are known to the tick.
+	s.burstPositions(ev.Tick)
 
 	if e.Projectile.Entity != nil {
 		entID := e.Projectile.Entity.ID()

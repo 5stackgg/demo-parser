@@ -343,3 +343,62 @@ func TestNormalizeMapName(t *testing.T) {
 		}
 	}
 }
+
+// A .tri is a soup of unwound triangles: the same wall can be stored facing
+// either way, so the normal has to be taken relative to the ray that found it.
+// A bounce computed off a flipped normal drives the grenade into the wall.
+func TestRayHitSurfaceNormalAlwaysFacesTheRay(t *testing.T) {
+	m := wallMesh()
+	for _, tc := range []struct {
+		name   string
+		origin r3.Vector
+		dir    r3.Vector
+		wantX  float64
+	}{
+		{"approaching from -X", r3.Vector{X: -30}, r3.Vector{X: 1}, -1},
+		{"approaching from +X", r3.Vector{X: 30}, r3.Vector{X: -1}, 1},
+	} {
+		hit, ok := m.RayHitSurface(tc.origin, tc.dir)
+		if !ok {
+			t.Fatalf("%s: expected a hit", tc.name)
+		}
+		if math.Abs(hit.Distance-30) > 1e-6 {
+			t.Errorf("%s: distance %v, want 30", tc.name, hit.Distance)
+		}
+		if math.Abs(hit.Normal.X-tc.wantX) > 1e-9 || hit.Normal.Y != 0 || hit.Normal.Z != 0 {
+			t.Errorf("%s: normal %v, want X=%v", tc.name, hit.Normal, tc.wantX)
+		}
+		if d := hit.Normal.Dot(tc.dir); d >= 0 {
+			t.Errorf("%s: normal points along the ray (dot %v)", tc.name, d)
+		}
+	}
+}
+
+func TestRayHitSurfaceMisses(t *testing.T) {
+	m := wallMesh()
+	if _, ok := m.RayHitSurface(r3.Vector{X: -30}, r3.Vector{X: -1}); ok {
+		t.Error("a ray pointing away from the wall should miss")
+	}
+	if _, ok := m.RayHitSurface(r3.Vector{X: -30}, r3.Vector{}); ok {
+		t.Error("a zero-length direction should miss rather than divide by zero")
+	}
+	var nilMesh *Mesh
+	if _, ok := nilMesh.RayHitSurface(r3.Vector{}, r3.Vector{X: 1}); ok {
+		t.Error("a nil mesh has no surfaces")
+	}
+}
+
+func TestBoundsCoverTheGeometry(t *testing.T) {
+	m := wallMesh()
+	lo, hi, ok := m.Bounds()
+	if !ok {
+		t.Fatal("a built mesh should report bounds")
+	}
+	if lo.Y > -50 || lo.Z > -50 || hi.Y < 50 || hi.Z < 50 {
+		t.Fatalf("bounds %v..%v do not cover the wall", lo, hi)
+	}
+	var nilMesh *Mesh
+	if _, _, ok := nilMesh.Bounds(); ok {
+		t.Error("a nil mesh has no bounds")
+	}
+}
