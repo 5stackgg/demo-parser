@@ -219,6 +219,7 @@ func Parse(r io.Reader) (*Result, error) {
 }
 
 func (s *state) registerHandlers() {
+	s.parser.RegisterNetMessageHandler(s.onDemoFileHeader)
 	s.parser.RegisterNetMessageHandler(s.onServerInfo)
 	s.parser.RegisterNetMessageHandler(s.onServerRankUpdate)
 

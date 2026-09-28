@@ -10,8 +10,16 @@ import (
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/msg"
 )
 
+// The file header carries the real server's hostname; GOTV demos report
+// "SourceTV" in ServerInfo, which says nothing about who ran the match.
+func (s *state) onDemoFileHeader(m *msg.CDemoFileHeader) {
+	if name := m.GetServerName(); name != "" {
+		s.res.ServerName = name
+	}
+}
+
 func (s *state) onServerInfo(m *msg.CSVCMsg_ServerInfo) {
-	if host := m.GetHostName(); host != "" {
+	if host := m.GetHostName(); host != "" && host != "SourceTV" && s.res.ServerName == "" {
 		s.res.ServerName = host
 	}
 	name := m.GetMapName()
