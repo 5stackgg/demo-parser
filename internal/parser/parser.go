@@ -220,11 +220,11 @@ func Parse(r io.Reader) (*Result, error) {
 
 func (s *state) registerHandlers() {
 	s.parser.RegisterNetMessageHandler(s.onServerInfo)
+	s.parser.RegisterNetMessageHandler(s.onServerRankUpdate)
 
 	s.parser.RegisterEventHandler(s.onPlayerInfo)
 	s.parser.RegisterEventHandler(s.onPlayerConnect)
 	s.parser.RegisterEventHandler(s.onPlayerNameChange)
-	s.parser.RegisterEventHandler(s.onRankUpdate)
 
 	s.parser.RegisterEventHandler(s.onMatchStart)
 	s.parser.RegisterEventHandler(s.onRoundStart)

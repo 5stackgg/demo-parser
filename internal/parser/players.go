@@ -70,40 +70,61 @@ func (s *state) recordPlayerRank(p *common.Player) {
 		return
 	}
 	pr := s.playerRanks[sid]
-	if rt > 0 {
+	// A rank update is authoritative for both rank and type; the scoreboard
+	// only fills in players who never got one.
+	if rt > 0 && (!pr.hasPrevious || pr.rankType == 0) {
 		pr.rankType = rt
 	}
-	// RankUpdate's RankNew is authoritative; only fall back to the scoreboard
-	// rank for players who never got an update event.
 	if r > 0 && !pr.hasPrevious {
 		pr.rank = r
 	}
 	s.playerRanks[sid] = pr
 }
 
-// onRankUpdate captures the rank change Valve emits at match end — the only
-// place RankOld (pre-match rank) is available, giving an exact per-match delta.
-func (s *state) onRankUpdate(e events.RankUpdate) {
-	sid := strconv.FormatUint(e.SteamID64(), 10)
-	if sid == "" || sid == "0" {
-		return
-	}
-	pr := s.playerRanks[sid]
-	pr.rank = e.RankNew
-	pr.previousRank = e.RankOld
-	pr.hasPrevious = true
-	pr.winCount = e.WinCount
-	if e.Player != nil {
-		if rt := e.Player.RankType(); rt > 0 {
+// onServerRankUpdate captures the rank change Valve emits at match end — the
+// only place RankOld (pre-match rank) is available, giving an exact per-match
+// delta. Each entry's rank_type_id names the ladder it moved, which can differ
+// from the scoreboard's rank type (a Wingman or Rush match still shows the
+// Premier rating there). demoinfocs' RankUpdate event drops that field, so the
+// user message is read directly.
+func (s *state) onServerRankUpdate(m *msg.CCSUsrMsg_ServerRankUpdate) {
+	for _, u := range m.GetRankUpdate() {
+		if u.GetAccountId() == 0 {
+			continue
+		}
+		steamID := common.ConvertSteamID32To64(uint32(u.GetAccountId()))
+		sid := strconv.FormatUint(steamID, 10)
+		pr := s.playerRanks[sid]
+		pr.rank = int(u.GetRankNew())
+		pr.previousRank = int(u.GetRankOld())
+		pr.hasPrevious = true
+		pr.winCount = int(u.GetNumWins())
+		if rt := int(u.GetRankTypeId()); rt > 0 {
 			pr.rankType = rt
+		} else if p := s.participantBySteamID(steamID); p != nil {
+			if rt := p.RankType(); rt > 0 {
+				pr.rankType = rt
+			}
+		}
+		s.playerRanks[sid] = pr
+		fmt.Fprintf(
+			os.Stderr,
+			"[rank-update] steam_id=%s old=%d new=%d change=%.2f type=%d wins=%d\n",
+			sid, pr.previousRank, pr.rank, u.GetRankChange(), pr.rankType, pr.winCount,
+		)
+	}
+}
+
+func (s *state) participantBySteamID(steamID uint64) *common.Player {
+	if s.parser == nil {
+		return nil
+	}
+	for _, p := range s.parser.GameState().Participants().All() {
+		if p != nil && p.SteamID64 == steamID {
+			return p
 		}
 	}
-	s.playerRanks[sid] = pr
-	fmt.Fprintf(
-		os.Stderr,
-		"[rank-update] steam_id=%s old=%d new=%d change=%.2f type=%d wins=%d\n",
-		sid, e.RankOld, e.RankNew, e.RankChange, pr.rankType, e.WinCount,
-	)
+	return nil
 }
 
 // Only the first write sticks — sides swap at halftime, so re-reading later
