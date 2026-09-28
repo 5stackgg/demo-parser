@@ -79,7 +79,7 @@ func TestSameRealMeshNeverReportsDrift(t *testing.T) {
 	other := realMeshRevision(t)
 	from := loadMesh(t, base, "de_mirage")
 	to := loadMesh(t, other, "de_mirage")
-	if from == to {
+	if from.Hull() == to.Hull() {
 		t.Fatal("test setup: wanted two separately built meshes")
 	}
 
@@ -430,7 +430,7 @@ func BenchmarkDriftBatchOnARealMesh(b *testing.B) {
 	from := loadMesh(b, realMeshRevision(b), "de_mirage")
 	to := loadMesh(b, realMeshRevision(b), "de_mirage")
 	b.Logf("de_mirage: %d triangles, %.1f MiB per mesh, %.1f MiB resident for the pair",
-		from.Triangles(), float64(from.Bytes())/(1<<20), float64(from.Bytes()+to.Bytes())/(1<<20))
+		from.Triangles(), float64(from.Hull().Bytes())/(1<<20), float64(from.Hull().Bytes()+to.Hull().Bytes())/(1<<20))
 
 	rng := rand.New(rand.NewSource(3))
 	const batch = 256

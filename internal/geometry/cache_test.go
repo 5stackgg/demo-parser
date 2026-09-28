@@ -1,12 +1,14 @@
 package geometry
 
 import (
+	"compress/gzip"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang/geo/r3"
 )
@@ -28,7 +30,7 @@ func (f *fetchLog) count(key string) int {
 	return f.n[key]
 }
 
-// serveMeshes stands in for the mesh CDN: any `<name>.tri` in the set is
+// serveMeshes stands in for the mesh CDN: any `<name>.tri.gz` in the set is
 // served as a one-triangle blob, anything else 404s the way a map with no
 // published mesh does. The returned log counts fetches per key, so a test can
 // tell a cache hit from a rebuild.
@@ -49,13 +51,15 @@ func serveMeshes(t *testing.T, have ...string) *fetchLog {
 	// goroutine, so it needs the lock even though Loads happen to be serial.
 	f := &fetchLog{n: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".tri")
+		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".tri.gz")
 		f.record(key)
 		if !published[key] {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write(blob)
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write(blob)
+		_ = zw.Close()
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("MAP_MESH_CDN", srv.URL)
@@ -67,11 +71,44 @@ func serveMeshes(t *testing.T, have ...string) *fetchLog {
 	return f
 }
 
+func (c *meshCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = map[string]*cached{}
+	c.lru = nil
+}
+
+// settle waits out a refresh already in flight, so a test can assert on what
+// it did and so no refresh outlives the test that started it.
+func (l *latestPointer) settle() {
+	l.mu.Lock()
+	wait := l.inflight
+	l.mu.Unlock()
+	if wait != nil {
+		<-wait
+	}
+}
+
+func (l *latestPointer) expire() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.expires = time.Now().Add(-time.Second)
+}
+
+func (l *latestPointer) reset() {
+	l.settle()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.src, l.resolved, l.good, l.expires = source{}, false, false, time.Time{}
+}
+
 func resetCache() {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	cache = map[string]*cached{}
-	lru = nil
+	hulls.reset()
+	grenadeClips.reset()
+	latest.reset()
+	manifestsMu.Lock()
+	manifests = map[string]*manifest{}
+	manifestsMu.Unlock()
 }
 
 // cachedMeshCount is the bound's own bookkeeping; cacheEntryCount is the map
@@ -79,15 +116,15 @@ func resetCache() {
 // Load, so tests assert on both — a leak that left entries in the map while the
 // LRU list looked empty is exactly the failure this package is here to avoid.
 func cachedMeshCount() int {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	return len(lru)
+	hulls.mu.Lock()
+	defer hulls.mu.Unlock()
+	return len(hulls.lru)
 }
 
 func cacheEntryCount() int {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
-	return len(cache)
+	hulls.mu.Lock()
+	defer hulls.mu.Unlock()
+	return len(hulls.entries)
 }
 
 func TestCacheEvictsLeastRecentlyUsedMesh(t *testing.T) {
@@ -186,7 +223,9 @@ func TestFailedLoadIsRetried(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway) // the CDN having a bad minute
 			return
 		}
-		_, _ = w.Write(blob)
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write(blob)
+		_ = zw.Close()
 	}))
 	defer srv.Close()
 	t.Setenv("MAP_MESH_CDN", srv.URL)
@@ -234,33 +273,37 @@ func TestCacheCanBeDisabled(t *testing.T) {
 }
 
 func TestResolveMeshRevision(t *testing.T) {
-	t.Setenv("MAP_MESH_CDN", "https://example.test/pinned/")
-	for ref, want := range map[string]string{
-		"":                                      "https://example.test/pinned",
-		"https://mirror.test/meshes/":           "https://mirror.test/meshes",
-		"http://127.0.0.1:8080":                 "http://127.0.0.1:8080",
-		"17595823-5":                            "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
-		"replay-map-meshes@17595823-5":          "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
-		"5stackgg/replay-map-meshes@17595823-5": "https://cdn.jsdelivr.net/gh/5stackgg/replay-map-meshes@17595823-5",
-		"someone-else/other-meshes@v1.2.3":      "https://cdn.jsdelivr.net/gh/someone-else/other-meshes@v1.2.3",
-	} {
+	// The old jsDelivr forms are rejected on purpose: a reference that silently
+	// resolved to a dead host would look like "this map has no mesh", which is
+	// the one failure mode this package must not have.
+	t.Setenv("MAP_MESH_CDN", "")
+
+	ok := map[string]string{
+		"":                             "",
+		"24957633":                     "24957633",
+		" 25537370 ":                   "25537370",
+		"https://example.test/meshes/": "https://example.test/meshes",
+		"http://127.0.0.1:8080/m":      "http://127.0.0.1:8080/m",
+	}
+	for ref, want := range ok {
 		got, err := ResolveMeshRevision(ref)
 		if err != nil {
-			t.Errorf("ResolveMeshRevision(%q): %v", ref, err)
-			continue
+			t.Fatalf("ResolveMeshRevision(%q): %v", ref, err)
 		}
 		if got != want {
-			t.Errorf("ResolveMeshRevision(%q) = %q, want %q", ref, got, want)
+			t.Fatalf("ResolveMeshRevision(%q) = %q, want %q", ref, got, want)
 		}
 	}
-	// A revision comes off a request body, so anything that could walk out of
-	// the pinned path has to be refused rather than pasted into a URL.
+
 	for _, bad := range []string{
-		"../../../etc", "tag/../..", "repo@tag/nested", "..", "a b", "tag?query=1",
-		"owner/repo@", "@tag", "owner/repo/extra@tag",
+		"5stackgg/replay-map-meshes@17595823-5",
+		"replay-map-meshes@17595823-5",
+		"../etc",
+		".",
+		"has space",
 	} {
-		if got, err := ResolveMeshRevision(bad); err == nil {
-			t.Errorf("ResolveMeshRevision(%q) should be refused, got %q", bad, got)
+		if _, err := ResolveMeshRevision(bad); err == nil {
+			t.Fatalf("ResolveMeshRevision(%q) should have been rejected", bad)
 		}
 	}
 }
@@ -277,7 +320,9 @@ func TestRevisionsAreSeparateCacheEntries(t *testing.T) {
 
 	serve := func(blob []byte) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write(blob)
+			zw := gzip.NewWriter(w)
+			_, _ = zw.Write(blob)
+			_ = zw.Close()
 		}))
 		t.Cleanup(srv.Close)
 		return srv.URL

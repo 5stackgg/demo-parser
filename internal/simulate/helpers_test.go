@@ -1,6 +1,8 @@
 package simulate
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/5stackgg/demo-parser/internal/geometry"
@@ -71,8 +74,19 @@ func triBlob(tris ...tri) []byte {
 	return buf
 }
 
-// meshRevisionServer stands in for one tagged mesh revision on the CDN, serving
-// the named .tri blobs. It returns a base URL usable as a mesh reference, which
+// gzipBlob wraps a raw .tri the way the publisher does: the mesh carries its
+// own gzip rather than a Content-Encoding, because a CDN worker strips that
+// header and will not re-compress octet-stream.
+func gzipBlob(raw []byte) []byte {
+	var out bytes.Buffer
+	zw := gzip.NewWriter(&out)
+	_, _ = zw.Write(raw)
+	_ = zw.Close()
+	return out.Bytes()
+}
+
+// meshRevisionServer stands in for one published mesh revision, serving the
+// named blobs gzipped. It returns a base URL usable as a mesh reference, which
 // is how a test gets two independently built meshes resident at once.
 func meshRevisionServer(t testing.TB, files map[string][]byte) string {
 	t.Helper()
@@ -82,15 +96,15 @@ func meshRevisionServer(t testing.TB, files map[string][]byte) string {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write(blob)
+		_, _ = w.Write(gzipBlob(blob))
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
 
-func loadMesh(t testing.TB, base, name string) *geometry.Mesh {
+func loadMesh(t testing.TB, base, name string) *geometry.GrenadeWorld {
 	t.Helper()
-	mesh, err := geometry.LoadRevision(name, base)
+	mesh, err := geometry.LoadGrenadeWorld(name, base)
 	if err != nil {
 		t.Fatalf("load %s from %s: %v", name, base, err)
 	}
@@ -102,9 +116,9 @@ func loadMesh(t testing.TB, base, name string) *geometry.Mesh {
 
 // synthRevision publishes one map ("de_test") built from the given triangles
 // and returns both the mesh and the revision reference that produced it.
-func synthRevision(t testing.TB, tris []tri) (*geometry.Mesh, string) {
+func synthRevision(t testing.TB, tris []tri) (*geometry.GrenadeWorld, string) {
 	t.Helper()
-	base := meshRevisionServer(t, map[string][]byte{"de_test.tri": triBlob(tris...)})
+	base := meshRevisionServer(t, map[string][]byte{"de_test.tri.gz": triBlob(tris...)})
 	return loadMesh(t, base, "de_test"), base
 }
 
@@ -143,7 +157,17 @@ func realMeshRevision(t testing.TB) string {
 	if dir == "" {
 		t.Skip("no replay-map-meshes clone found above the working directory; set MAP_MESH_FIXTURES")
 	}
-	srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
+	// The fixture clone holds raw .tri; the fetcher asks for .tri.gz, so the
+	// gzip is applied here rather than requiring a re-published fixture.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimSuffix(filepath.Base(r.URL.Path), ".gz")
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(gzipBlob(raw))
+	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
@@ -189,7 +213,7 @@ func floorWithHole() []tri {
 // meshPair is a built mesh together with the revision reference that produced
 // it, which is what a DriftRequest names.
 type meshPair struct {
-	mesh *geometry.Mesh
+	mesh *geometry.GrenadeWorld
 	ref  string
 }
 

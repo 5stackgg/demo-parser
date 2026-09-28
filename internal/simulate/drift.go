@@ -134,10 +134,11 @@ type LineupDrift struct {
 // DriftRequest asks which of a batch of lineups a map patch moved.
 type DriftRequest struct {
 	Map string `json:"map"`
-	// From and To name the mesh revisions to compare — a jsDelivr tag
-	// ("17595823-4"), an owner/repo@tag, or an http(s) base. Empty means the
-	// revision this process is pinned to, which is the useful spelling for To
-	// right after a deploy.
+	// From and To name the mesh revisions to compare — a CS2 build id
+	// ("25537370"), read through that build's manifest.json when it published
+	// one, or an http(s) base holding <map>.tri.gz directly. Empty means the
+	// process default (the build latest.json names, or MAP_MESH_CDN), which is
+	// the useful spelling for To right after a map update is published.
 	From string `json:"from"`
 	To   string `json:"to"`
 	// Lineups is the batch. Order is preserved in the response.
@@ -213,18 +214,28 @@ type DriftResponse struct {
 	Caveats []string `json:"caveats"`
 }
 
-// DriftCaveats is what a consumer of this endpoint has to be told, every time.
-func DriftCaveats() []string {
-	return []string{
+// DriftCaveats is what a consumer of this endpoint has to be told, every time,
+// plus a warning when only one side carries grenade clips.
+func DriftCaveats(from, to *geometry.GrenadeWorld) []string {
+	caveats := []string{
 		"comparison points are simulator output, not real landings: the physics model is " +
 			"approximate and unfitted, and no coordinate here may be shown to a player as " +
 			"where their nade lands",
 		"only the difference between the two runs is meaningful; a constant model error " +
 			"appears on both sides and cancels",
 		"a lineup with no recorded initial_velocity is unsimulatable, not unchanged",
-		"an 'unchanged' verdict means the collision mesh did not move under this lineup — " +
-			"it says nothing about textures, clipping, or anything the .tri does not carry",
+		"an 'unchanged' verdict means neither the collision hull nor the grenade clips moved " +
+			"under this lineup — it says nothing about textures, props that do not collide, or " +
+			"anything else the meshes do not carry",
 	}
+	if (from.GrenadeClipTriangles() == 0) != (to.GrenadeClipTriangles() == 0) {
+		caveats = append(caveats, fmt.Sprintf(
+			"only one revision publishes grenade clips (from: %d triangles, to: %d); builds "+
+				"published before grenade clips existed are simulated without them, so a lineup "+
+				"that touches one reads as moved even where the map did not change",
+			from.GrenadeClipTriangles(), to.GrenadeClipTriangles()))
+	}
+	return caveats
 }
 
 // DriftOptions are the server-side knobs, kept out of the request body because
@@ -248,7 +259,7 @@ type DriftOptions struct {
 // from and to must be the SAME map at two revisions. Nothing here can check
 // that — two unrelated meshes will produce a report saying every lineup broke,
 // which is technically true and useless.
-func Drift(from, to *geometry.Mesh, req DriftRequest, opts DriftOptions) (DriftResponse, error) {
+func Drift(from, to *geometry.GrenadeWorld, req DriftRequest, opts DriftOptions) (DriftResponse, error) {
 	if from == nil || from.Triangles() == 0 || to == nil || to.Triangles() == 0 {
 		return DriftResponse{}, ErrNoMesh
 	}
@@ -273,7 +284,7 @@ func Drift(from, to *geometry.Mesh, req DriftRequest, opts DriftOptions) (DriftR
 		To:         req.To,
 		Constants:  consts,
 		Thresholds: thresholds,
-		Caveats:    DriftCaveats(),
+		Caveats:    DriftCaveats(from, to),
 	}
 	if opts.Emit == nil {
 		out.Results = make([]LineupDrift, 0, len(req.Lineups))
@@ -332,7 +343,7 @@ func Drift(from, to *geometry.Mesh, req DriftRequest, opts DriftOptions) (DriftR
 }
 
 // driftOne is the whole verdict, for one lineup.
-func driftOne(fromMesh, toMesh *geometry.Mesh, index int, seed LineupSeed, c Constants, t Thresholds) LineupDrift {
+func driftOne(fromMesh, toMesh *geometry.GrenadeWorld, index int, seed LineupSeed, c Constants, t Thresholds) LineupDrift {
 	d := LineupDrift{Index: index, ID: seed.ID}
 
 	nade, ok := ParseNadeType(seed.NadeType)
