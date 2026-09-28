@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"compress/gzip"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,7 +40,9 @@ func TestLosGating(t *testing.T) {
 			s := &state{res: &Result{}, meshTried: true}
 			if tc.withMap {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Write(wallTriBlob())
+					zw := gzip.NewWriter(w)
+					_, _ = zw.Write(wallTriBlob())
+					_ = zw.Close()
 				}))
 				defer srv.Close()
 				t.Setenv("MAP_MESH_CDN", srv.URL)

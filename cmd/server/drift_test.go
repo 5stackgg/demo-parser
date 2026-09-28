@@ -2,9 +2,14 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,7 +31,16 @@ func meshRevisions(t *testing.T, n int) []string {
 	t.Setenv("MAP_MESH_CACHE", "4")
 	refs := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(filepath.Base(r.URL.Path), ".gz")))
+			if err != nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			zw := gzip.NewWriter(w)
+			_, _ = zw.Write(raw)
+			_ = zw.Close()
+		}))
 		t.Cleanup(srv.Close)
 		refs = append(refs, srv.URL)
 	}
@@ -218,6 +232,7 @@ func TestDriftEndpointRefusesAnUnbufferableBatch(t *testing.T) {
 }
 
 func TestDriftEndpointRejectsBadRequests(t *testing.T) {
+	t.Setenv("MAP_MESH_CDN", "")
 	cases := []struct {
 		name string
 		req  simulate.DriftRequest
@@ -270,5 +285,87 @@ func TestDriftEndpointRejectsNonPost(t *testing.T) {
 	handleDrift(w, httptest.NewRequest(http.MethodGet, "/drift", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status %d", w.Code)
+	}
+}
+
+// synthRevision serves one map ("de_clip") from raw triangles, each file a
+// flat list of 9-float triangles, gzipped the way the publisher ships them.
+func synthRevision(t *testing.T, files map[string][][9]float64) string {
+	t.Helper()
+	blobs := map[string][]byte{}
+	for name, tris := range files {
+		raw := make([]byte, 0, len(tris)*36)
+		for _, tri := range tris {
+			for _, f := range tri {
+				raw = binary.LittleEndian.AppendUint32(raw, math.Float32bits(float32(f)))
+			}
+		}
+		blobs[name] = raw
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, ok := blobs[filepath.Base(r.URL.Path)]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write(raw)
+		_ = zw.Close()
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// The drift endpoint flies against the hull plus the grenade clips: a build
+// that adds a clip in front of a lineup moves it, and the report says one side
+// had none.
+func TestDriftEndpointFliesIntoGrenadeClips(t *testing.T) {
+	t.Setenv("MAP_MESH_CACHE", "4")
+	floor := [][9]float64{
+		{-2000, -2000, 0, 2000, -2000, 0, 2000, 2000, 0},
+		{-2000, -2000, 0, 2000, 2000, 0, -2000, 2000, 0},
+	}
+	clipWall := [][9]float64{
+		{150, -2000, -10, 150, 2000, -10, 150, 2000, 1000},
+		{150, -2000, -10, 150, 2000, 1000, 150, -2000, 1000},
+	}
+	bare := synthRevision(t, map[string][][9]float64{"de_clip.tri.gz": floor})
+	clipped := synthRevision(t, map[string][][9]float64{
+		"de_clip.tri.gz":             floor,
+		"de_clip.grenadeclip.tri.gz": clipWall,
+	})
+
+	w := post(t, handleDrift, simulate.DriftRequest{
+		Map:  "de_clip",
+		From: bare,
+		To:   clipped,
+		Lineups: []simulate.LineupSeed{{
+			ID:              "into-the-clip",
+			NadeType:        "Smoke",
+			InitialPosition: &simulate.Point{X: 0, Y: 0, Z: 64},
+			InitialVelocity: &simulate.Point{X: 500, Y: 0, Z: 200},
+		}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var res simulate.DriftResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(res.Results) != 1 || res.Results[0].Verdict != simulate.VerdictMoved {
+		t.Fatalf("a grenade clip in the flight path should move the lineup, got %+v", res.Results)
+	}
+	if res.Results[0].To.ComparisonPoint.X >= 150 {
+		t.Fatalf("the clipped flight should end short of the clip, got %+v", res.Results[0].To)
+	}
+	warned := false
+	for _, c := range res.Caveats {
+		if strings.Contains(c, "grenade clips") && strings.Contains(c, "only one revision") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("the report should say only one side carries grenade clips: %q", res.Caveats)
 	}
 }

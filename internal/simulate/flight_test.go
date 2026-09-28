@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/5stackgg/demo-parser/internal/geometry"
 	"github.com/golang/geo/r3"
 )
 
@@ -40,7 +41,7 @@ func TestIdenticalMeshesGiveIdenticalFlights(t *testing.T) {
 	tris := floorQuad(0, 0, 0, 2000)
 	a, _ := synthRevision(t, tris)
 	b, _ := synthRevision(t, tris)
-	if a == b {
+	if a.Hull() == b.Hull() {
 		t.Fatal("test setup: wanted two separately built meshes")
 	}
 	left, err := SimulateForComparison(a, openThrow, DefaultConstants())
@@ -181,6 +182,48 @@ func TestEnclosedDetectsBeingInsideASolid(t *testing.T) {
 	open, _ := synthRevision(t, floorQuad(0, 0, 0, 2000))
 	if enclosed(open, r3.Vector{Z: 4}, 64) {
 		t.Fatal("a point standing on open ground is not enclosed")
+	}
+}
+
+// Grenade clips are the one surface only a grenade collides with: the flight
+// has to bounce off one that the LOS mesh cannot see at all.
+func TestGrenadeClipsStopTheFlightButNotTheSightline(t *testing.T) {
+	floor := triBlob(floorQuad(0, 0, 0, 2000)...)
+	clipWall := triBlob(quad(pt(150, -2000, -10), pt(150, 2000, -10), pt(150, 2000, 1000), pt(150, -2000, 1000))...)
+	clipped := meshRevisionServer(t, map[string][]byte{
+		"de_test.tri.gz":             floor,
+		"de_test.grenadeclip.tri.gz": clipWall,
+	})
+	bare := meshRevisionServer(t, map[string][]byte{"de_test.tri.gz": floor})
+
+	with := loadMesh(t, clipped, "de_test")
+	without := loadMesh(t, bare, "de_test")
+	if with.GrenadeClipTriangles() == 0 || without.GrenadeClipTriangles() != 0 {
+		t.Fatalf("test setup: clip triangles with %d, without %d",
+			with.GrenadeClipTriangles(), without.GrenadeClipTriangles())
+	}
+
+	stopped, err := SimulateForComparison(with, openThrow, DefaultConstants())
+	if err != nil {
+		t.Fatalf("simulate with clip: %v", err)
+	}
+	free, err := SimulateForComparison(without, openThrow, DefaultConstants())
+	if err != nil {
+		t.Fatalf("simulate without clip: %v", err)
+	}
+	if !stopped.Resolved || stopped.ComparisonPoint.X >= 150 {
+		t.Fatalf("the grenade clip should have turned the throw back, got %+v", stopped)
+	}
+	if free.ComparisonPoint.X <= 150 {
+		t.Fatalf("test setup: without the clip the throw should carry past it, got %+v", free)
+	}
+
+	hull, err := geometry.LoadRevision("de_test", clipped)
+	if err != nil || hull == nil {
+		t.Fatalf("load the LOS mesh: %v, %v", hull, err)
+	}
+	if hull.Occluded(pt(0, 0, 64), pt(300, 0, 64)) {
+		t.Fatal("the grenade clip must not block line of sight")
 	}
 }
 

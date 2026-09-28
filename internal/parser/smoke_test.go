@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/binary"
 	"math"
@@ -25,7 +26,10 @@ func mustVolume(mesh *geometry.Mesh, center r3.Vector) *smokeVolume {
 func meshFromBlob(t *testing.T, blob []byte) *geometry.Mesh {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(blob)
+		// Published meshes carry their own gzip; see publish-map-assets.mjs.
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write(blob)
+		_ = zw.Close()
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("MAP_MESH_CDN", srv.URL)

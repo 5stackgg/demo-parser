@@ -21,6 +21,22 @@ The last four answer questions about a **map**, not a demo, so they work for a
 lineup nobody has ever thrown. They need the map's collision mesh and return
 `404` when none is published for it. Coordinates are raw CS2 source units.
 
+Map meshes come from `https://demo-dl.5stack.gg/maps/`: `latest.json` names the
+newest build's manifest (cached 10 minutes, refreshed in the background, and
+possibly a revision such as `<build>/manifest.r2.json`), and the manifest names
+each map's `tri` (collision hull) and `grenadeclip` files. A map the manifest
+does not list uses build `24957633`'s flat `<map>.tri.gz` with no grenade clips,
+and if `latest.json` cannot be read — or is not version 1 — everything falls
+back to that build. A file the manifest lists but the CDN refuses is an error
+and is retried, never remembered as "no mesh". Setting `MAP_MESH_CDN` to a base
+URL skips all of that and reads `<base>/<map>.tri.gz` directly; setting it empty
+disables geometry.
+
+Line of sight, smoke flood fill, `/sightlines` and `/oneway` use the hull only.
+Grenade clips block nothing but grenades, so only the `/drift` flight
+simulation collides with them, and a build that published none is flown
+against the hull alone.
+
 `/smoke-volume` returns the same voxel grid the playback blob carries
 (`ox/oy/oz`, `vs`, `dx/dy/dz`, `den`), so one decoder serves both, plus `cells`
 and `radius`. A point that resolves inside geometry returns `422`.
@@ -55,8 +71,8 @@ this endpoint may ever be shown to a player as where their nade lands.**
 POST /drift
 {
   "map": "de_mirage",
-  "from": "17595823-4",          // mesh revision before the patch
-  "to":   "17595823-5",          // after it; "" means the revision this process is pinned to
+  "from": "24957633",            // CS2 build before the patch
+  "to":   "25537370",            // after it; "" means the build latest.json names
   "lineups": [
     {
       "id": "1f4c…",
@@ -72,9 +88,12 @@ POST /drift
 }
 ```
 
-A **mesh revision** is a jsDelivr tag (`17595823-5`), an `owner/repo@tag`, or an
-`http(s)` base for a mirror. `from` and `to` come back **resolved**, so a blank
-one is legible in the report later.
+A **mesh revision** is a CS2 build id (`25537370`, read through that build's
+first manifest `<build>/manifest.json`, or `<build>/<map>.tri.gz` for builds
+published before manifests) or an `http(s)` base holding `<map>.tri.gz` directly. `from` and `to`
+come back **resolved**, so a blank one is legible in the report later. When only
+one side published grenade clips, `caveats` says so: a lineup that touches one
+reads as moved even where the map did not change.
 
 Each lineup gets one of four verdicts:
 

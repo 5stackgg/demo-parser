@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -57,7 +59,20 @@ func serveLocalMeshes(t *testing.T) {
 	if dir == "" {
 		t.Skip("no replay-map-meshes clone found above the working directory; set MAP_MESH_FIXTURES")
 	}
-	srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
+	// The fixture clone holds raw .tri; the fetcher asks for .tri.gz, so the
+	// gzip is applied here rather than requiring a re-published fixture.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(filepath.Base(r.URL.Path), ".gz")))
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var out bytes.Buffer
+		zw := gzip.NewWriter(&out)
+		_, _ = zw.Write(raw)
+		_ = zw.Close()
+		_, _ = w.Write(out.Bytes())
+	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("MAP_MESH_CDN", srv.URL)
 }

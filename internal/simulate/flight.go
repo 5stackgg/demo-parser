@@ -350,7 +350,8 @@ type ComparableOutcome struct {
 // "it flew forever" but "this cannot be asked".
 var ErrNoMesh = errors.New("no collision mesh to simulate against")
 
-// SimulateForComparison integrates one grenade flight against one mesh.
+// SimulateForComparison integrates one grenade flight against one map: its
+// collision hull plus its grenade clips.
 //
 // The name is the warning: this function's output exists to be subtracted from
 // another run of the same function against a different mesh. On its own it is
@@ -360,7 +361,7 @@ var ErrNoMesh = errors.New("no collision mesh to simulate against")
 // not a number, constants the integrator rejects). A flight that runs but does
 // not resolve is not an error — it is an outcome with Resolved false, because
 // "this lineup no longer works" is a result and not a failure.
-func SimulateForComparison(mesh *geometry.Mesh, seed Seed, c Constants) (ComparableOutcome, error) {
+func SimulateForComparison(mesh *geometry.GrenadeWorld, seed Seed, c Constants) (ComparableOutcome, error) {
 	if mesh == nil || mesh.Triangles() == 0 {
 		return ComparableOutcome{}, ErrNoMesh
 	}
@@ -457,7 +458,7 @@ type contactInfo struct {
 
 // advance moves the grenade for one timestep, resolving up to
 // maxContactsPerStep surfaces along the way.
-func advance(mesh *geometry.Mesh, pos, vel r3.Vector, dt float64, c Constants) (r3.Vector, r3.Vector, contactInfo) {
+func advance(mesh *geometry.GrenadeWorld, pos, vel r3.Vector, dt float64, c Constants) (r3.Vector, r3.Vector, contactInfo) {
 	var info contactInfo
 	remaining := dt
 	for i := 0; i < maxContactsPerStep; i++ {
@@ -530,7 +531,7 @@ var axes = [6]r3.Vector{
 // solids, so ray parity says nothing. It answers the question that actually
 // matters ("is there space here") rather than the one that does not ("is this
 // point within a volume").
-func enclosed(mesh *geometry.Mesh, at r3.Vector, probe float64) bool {
+func enclosed(mesh *geometry.GrenadeWorld, at r3.Vector, probe float64) bool {
 	if probe <= 0 {
 		return false
 	}

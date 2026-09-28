@@ -114,24 +114,22 @@ func handleDrift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromRef, err := geometry.ResolveMeshRevision(req.From)
-	if err != nil {
+	if _, err := geometry.ResolveMeshRevision(req.From); err != nil {
 		http.Error(w, fmt.Sprintf("from: %v", err), http.StatusBadRequest)
 		return
 	}
-	toRef, err := geometry.ResolveMeshRevision(req.To)
-	if err != nil {
+	if _, err := geometry.ResolveMeshRevision(req.To); err != nil {
 		http.Error(w, fmt.Sprintf("to: %v", err), http.StatusBadRequest)
 		return
 	}
 	warnIfCacheTooSmall()
 
-	fromMesh, err := meshRevision(req.Map, req.From)
+	fromMesh, err := grenadeWorld(req.Map, req.From)
 	if err != nil {
 		driftMeshError(w, "from", req.Map, req.From, err)
 		return
 	}
-	toMesh, err := meshRevision(req.Map, req.To)
+	toMesh, err := grenadeWorld(req.Map, req.To)
 	if err != nil {
 		driftMeshError(w, "to", req.Map, req.To, err)
 		return
@@ -143,10 +141,10 @@ func handleDrift(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseDrift()
 
-	// Echo the resolved revisions rather than what was sent, so an empty "from"
-	// (meaning "whatever this process is pinned to") is legible in the report
-	// months later.
-	req.From, req.To = fromRef, toRef
+	// Echo the revisions the worlds were actually loaded at rather than what was
+	// sent, so an empty "from" (the process default) is legible in the report
+	// months later and names the build even if latest.json moved since.
+	req.From, req.To = fromMesh.Revision(), toMesh.Revision()
 
 	if req.Stream {
 		streamDrift(w, fromMesh, toMesh, req)
@@ -165,28 +163,29 @@ func handleDrift(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
-// meshRevision loads one revision of a map's mesh, mapping "no .tri published"
-// onto the same ErrNoMesh the other endpoints use.
-func meshRevision(mapName, revision string) (*geometry.Mesh, error) {
-	mesh, err := geometry.LoadRevision(mapName, revision)
+// grenadeWorld loads one revision of what a grenade collides with on a map —
+// the hull plus its grenade clips, unlike the LOS endpoints — mapping "no .tri
+// published" onto the same ErrNoMesh the other endpoints use.
+func grenadeWorld(mapName, revision string) (*geometry.GrenadeWorld, error) {
+	world, err := geometry.LoadGrenadeWorld(mapName, revision)
 	if err != nil {
 		return nil, errUpstream{fmt.Errorf("load mesh for %s: %w", mapName, err)}
 	}
-	if mesh == nil {
+	if world == nil {
 		return nil, simulate.ErrNoMesh
 	}
-	return mesh, nil
+	return world, nil
 }
 
 // driftMeshError names which side failed. "no mesh at revision X" and "no mesh
 // at revision Y" are very different problems for the caller — the first is a
-// bad old tag, the second means the new mesh set has not been published yet.
+// bad old build, the second means the new build has not been published yet.
 func driftMeshError(w http.ResponseWriter, side, mapName, revision string, err error) {
 	var upstream errUpstream
 	switch {
 	case errors.Is(err, simulate.ErrNoMesh):
 		if revision == "" {
-			revision = "the pinned revision"
+			revision = "the default revision"
 		}
 		http.Error(w, fmt.Sprintf("%s: no collision mesh for map %q at %s", side, mapName, revision),
 			http.StatusNotFound)
@@ -219,7 +218,7 @@ func releaseDrift() {
 // failure part way through cannot be a status code — it is a final line with
 // type "error", and a consumer that does not check for one will silently treat
 // a truncated run as a clean one.
-func streamDrift(w http.ResponseWriter, fromMesh, toMesh *geometry.Mesh, req simulate.DriftRequest) {
+func streamDrift(w http.ResponseWriter, fromMesh, toMesh *geometry.GrenadeWorld, req simulate.DriftRequest) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -234,7 +233,7 @@ func streamDrift(w http.ResponseWriter, fromMesh, toMesh *geometry.Mesh, req sim
 		Lineups:    len(req.Lineups),
 		Constants:  consts,
 		Thresholds: req.Thresholds(),
-		Caveats:    simulate.DriftCaveats(),
+		Caveats:    simulate.DriftCaveats(fromMesh, toMesh),
 	}); err != nil {
 		return
 	}

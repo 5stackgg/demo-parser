@@ -42,10 +42,11 @@ func releaseGeometry() {
 	<-geometrySlots
 }
 
-// meshFor resolves a map name to its collision mesh. geometry.Load is
-// process-wide, concurrency-safe and LRU-bounded (MAP_MESH_CACHE), so many maps
-// can pass through this service without it holding all of them: a mesh is 2-19
-// MB on the wire and several times that once the BVH is built.
+// meshFor resolves a map name to its collision mesh — never the grenade clips,
+// which block no sightline. geometry.Load is process-wide, concurrency-safe and
+// LRU-bounded (MAP_MESH_CACHE), so many maps can pass through this service
+// without it holding all of them: a mesh is a few MB gzipped on the wire, up to
+// ~40 MB of .tri once inflated, and more again once the BVH is built.
 func meshFor(mapName string) (*geometry.Mesh, error) {
 	if strings.TrimSpace(mapName) == "" {
 		return nil, errors.New("map is required")
