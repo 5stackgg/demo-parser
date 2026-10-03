@@ -143,6 +143,108 @@ func (s *state) recordBlast(tick int, center r3.Vector, radius, full float64) {
 	s.blastCount++
 }
 
+// A bullet bores a tunnel through smoke. The client clears the cells along
+// every tracer that crosses a cloud and lets them fill back in, so a player
+// spraying into a smoke opens a sightline down their own line of fire — and,
+// since a tunnel runs both ways, the one back at them too.
+//
+// Unlike the blast numbers, none of these come from the shader breakdown; they
+// are ours, and the knobs worth revisiting against real demos. The tracer is
+// taken along the shooter's view rather than the bullet's spread or recoil, so
+// the full-strength radius is also slack for a line of fire a degree or so off
+// the crosshair. It has to be more than half a cell wide regardless: any cell a
+// sightline crosses has its centre up to half a cell diagonal (~14u) away, and
+// a tunnel narrower than that cannot open even the sightline running straight
+// down it.
+const (
+	bulletHoleRadius     = 40.0
+	bulletHoleFullRadius = 20.0
+	bulletHoleSecs       = 1.0
+	// bulletReach caps a tracer that hits no wall. Past it the round is spent.
+	bulletReach = 8192.0
+)
+
+// bulletHole is one tracer that crossed a cloud.
+type bulletHole struct {
+	from, to r3.Vector
+	tick     int
+}
+
+// radiusAt is how wide the tunnel still is at a tick, closing to nothing as the
+// cloud fills back in.
+func (h bulletHole) radiusAt(tick int, rate float64) float64 {
+	if tick < h.tick || rate <= 0 {
+		return 0
+	}
+	age := float64(tick-h.tick) / rate
+	if age >= bulletHoleSecs {
+		return 0
+	}
+	return bulletHoleRadius * (1 - age/bulletHoleSecs)
+}
+
+// activeHole is a tunnel resolved to a concrete cleared capsule at one tick.
+type activeHole struct {
+	from, to r3.Vector
+	radiusSq float64
+	fullSq   float64
+}
+
+// recordBulletHole registers a tracer, but only when it passes near a cloud
+// that is up at the time — almost every shot goes nowhere near smoke and should
+// cost the sightline tests nothing. Holes are cleared per round along with the
+// clouds they act on.
+func (s *state) recordBulletHole(tick int, from, to r3.Vector) {
+	for i := range s.smokes {
+		c := &s.smokes[i]
+		if c.vol == nil || c.bloomRadiusAt(tick, s.tickRate) <= 0 {
+			continue
+		}
+		if c.vol.nearSegment(from, to, bulletHoleRadius) {
+			s.holes = append(s.holes, bulletHole{from: from, to: to, tick: tick})
+			s.holeCount++
+			return
+		}
+	}
+}
+
+// holesAt collects the tunnels still open at a tick that could touch a
+// sightline. A tunnel only thins cells within its radius of the tracer, and a
+// cell the sightline crosses has its centre within a cell width of it, so a
+// tunnel further off than the two together is dropped here once rather than
+// tested again at every cell.
+func (s *state) holesAt(tick int, from, to r3.Vector) []activeHole {
+	if len(s.holes) == 0 {
+		return nil
+	}
+	var out []activeHole
+	for _, h := range s.holes {
+		r := h.radiusAt(tick, s.tickRate)
+		if r <= 0 {
+			continue
+		}
+		reach := r + smokeVoxelSize
+		if segmentDistSq(from, to, h.from, h.to) > reach*reach {
+			continue
+		}
+		// As with blasts, the full-strength core shrinks with the tunnel.
+		full := bulletHoleFullRadius * (r / bulletHoleRadius)
+		out = append(out, activeHole{from: h.from, to: h.to, radiusSq: r * r, fullSq: full * full})
+	}
+	return out
+}
+
+// smokeClearing is everything holding smoke open at one tick: explosions and
+// bullet tunnels.
+type smokeClearing struct {
+	blasts []activeBlast
+	holes  []activeHole
+}
+
+func (cl smokeClearing) empty() bool {
+	return len(cl.blasts) == 0 && len(cl.holes) == 0
+}
+
 // smokeVolume is a voxel density field. origin is the world position of the
 // (0,0,0) cell's minimum corner, so cell (i,j,k) spans
 // origin + (i,j,k)*size … origin + (i+1,j+1,k+1)*size.
@@ -443,7 +545,7 @@ func (v *smokeVolume) blurInto(raw []float64, filled []bool) {
 // less than one through its core.
 // limit lets the boolean test stop early once the answer is settled; pass
 // math.Inf(1) for an exact depth.
-func (v *smokeVolume) opticalDepthLimit(from, to r3.Vector, center r3.Vector, bloomRadius float64, blasts []activeBlast, limit float64) float64 {
+func (v *smokeVolume) opticalDepthLimit(from, to r3.Vector, center r3.Vector, bloomRadius float64, clr smokeClearing, limit float64) float64 {
 	if v == nil || bloomRadius <= 0 {
 		return 0
 	}
@@ -520,7 +622,7 @@ func (v *smokeVolume) opticalDepthLimit(from, to r3.Vector, center r3.Vector, bl
 				// Path length through this cell, expressed in cell widths so
 				// the result does not depend on the grid's resolution.
 				span := (tNext - t) * segLen / v.size
-				depth += float64(d) / densityMax * span * blastThinning(c, blasts)
+				depth += float64(d) / densityMax * span * clr.thinning(c)
 				if depth >= limit {
 					return depth
 				}
@@ -541,43 +643,104 @@ func (v *smokeVolume) opticalDepthLimit(from, to r3.Vector, center r3.Vector, bl
 }
 
 // opticalDepth is the exact amount of smoke on a sightline.
-func (v *smokeVolume) opticalDepth(from, to r3.Vector, center r3.Vector, bloomRadius float64, blasts []activeBlast) float64 {
-	return v.opticalDepthLimit(from, to, center, bloomRadius, blasts, math.Inf(1))
+func (v *smokeVolume) opticalDepth(from, to r3.Vector, center r3.Vector, bloomRadius float64, clr smokeClearing) float64 {
+	return v.opticalDepthLimit(from, to, center, bloomRadius, clr, math.Inf(1))
 }
 
 // occludedSegment reports whether a sightline is hidden by this cloud. Stops
 // accumulating as soon as the threshold is passed, since the exact figure does
 // not matter once the answer is known.
-func (v *smokeVolume) occludedSegment(from, to r3.Vector, center r3.Vector, bloomRadius float64, blasts []activeBlast) bool {
-	return v.opticalDepthLimit(from, to, center, bloomRadius, blasts, blockingDepth) >= blockingDepth
+func (v *smokeVolume) occludedSegment(from, to r3.Vector, center r3.Vector, bloomRadius float64, clr smokeClearing) bool {
+	return v.opticalDepthLimit(from, to, center, bloomRadius, clr, blockingDepth) >= blockingDepth
 }
 
-// blastThinning returns the fraction of a cell's density that survives the
-// explosions currently acting on it.
+// thinning returns the fraction of a cell's density that survives the
+// explosions and bullet tunnels currently acting on it.
 //
-// The article's breakdown of the shader has density driven to 2% at full
+// The article's breakdown of the shader has a blast drive density to 2% at full
 // strength, with the effect at full strength inside 100 units and fading out by
 // 250. That gradient is reproduced here rather than collapsed to a hole, since
-// the whole point of a density field is that partial thinning counts.
-func blastThinning(c r3.Vector, blasts []activeBlast) float64 {
+// the whole point of a density field is that partial thinning counts. A tunnel
+// gets the same profile, measured from the tracer rather than a point.
+func (cl smokeClearing) thinning(c r3.Vector) float64 {
 	survive := 1.0
-	for _, b := range blasts {
+	for _, b := range cl.blasts {
 		dx, dy, dz := c.X-b.center.X, c.Y-b.center.Y, c.Z-b.center.Z
-		distSq := dx*dx + dy*dy + dz*dz
-		if distSq >= b.radiusSq {
-			continue
-		}
-		strength := 1.0
-		if distSq > b.fullSq {
-			d := math.Sqrt(distSq)
-			f := (d - math.Sqrt(b.fullSq)) / (math.Sqrt(b.radiusSq) - math.Sqrt(b.fullSq))
-			strength = 1 - f*f*(3-2*f)
-		}
-		// residualDensity is the floor the shader leaves behind at full
-		// strength — thinned to a couple of percent, not erased.
-		survive *= 1 - strength*(1-residualDensity)
+		survive *= 1 - clearStrength(dx*dx+dy*dy+dz*dz, b.radiusSq, b.fullSq)*(1-residualDensity)
+	}
+	for _, h := range cl.holes {
+		survive *= 1 - clearStrength(pointSegmentDistSq(c, h.from, h.to), h.radiusSq, h.fullSq)*(1-residualDensity)
 	}
 	return survive
+}
+
+// clearStrength is how hard a clearing acts at a squared distance from it: 1
+// inside the full radius, easing to 0 at the outer one. residualDensity is the
+// floor that leaves behind at full strength — thinned, not erased.
+func clearStrength(distSq, radiusSq, fullSq float64) float64 {
+	if distSq >= radiusSq {
+		return 0
+	}
+	if distSq <= fullSq {
+		return 1
+	}
+	full := math.Sqrt(fullSq)
+	f := (math.Sqrt(distSq) - full) / (math.Sqrt(radiusSq) - full)
+	return 1 - f*f*(3-2*f)
+}
+
+// pointSegmentDistSq is the squared distance from p to the segment a → b.
+func pointSegmentDistSq(p, a, b r3.Vector) float64 {
+	ab := b.Sub(a)
+	t := 0.0
+	if l := ab.Norm2(); l > 1e-12 {
+		t = math.Max(0, math.Min(1, p.Sub(a).Dot(ab)/l))
+	}
+	return p.Sub(a.Add(ab.Mul(t))).Norm2()
+}
+
+// segmentDistSq is the squared distance between the closest points of the
+// segments p1 → q1 and p2 → q2: solve for the closest pair on the two infinite
+// lines, then clamp each parameter to its segment, re-solving the other after
+// each clamp.
+func segmentDistSq(p1, q1, p2, q2 r3.Vector) float64 {
+	d1, d2, r := q1.Sub(p1), q2.Sub(p2), p1.Sub(p2)
+	a, e, f := d1.Norm2(), d2.Norm2(), d2.Dot(r)
+	clamp := func(x float64) float64 { return math.Max(0, math.Min(1, x)) }
+	var s, t float64
+	switch {
+	case a <= 1e-12 && e <= 1e-12:
+		return r.Norm2()
+	case a <= 1e-12:
+		t = clamp(f / e)
+	case e <= 1e-12:
+		s = clamp(-d1.Dot(r) / a)
+	default:
+		b, c := d1.Dot(d2), d1.Dot(r)
+		if denom := a*e - b*b; denom > 1e-12 {
+			s = clamp((b*f - c*e) / denom)
+		}
+		t = (b*s + f) / e
+		if t < 0 {
+			t, s = 0, clamp(-c/a)
+		} else if t > 1 {
+			t, s = 1, clamp((b-c)/a)
+		}
+	}
+	return p1.Add(d1.Mul(s)).Sub(p2.Add(d2.Mul(t))).Norm2()
+}
+
+// nearSegment reports whether the segment from → to passes within margin of the
+// grid's bounds.
+func (v *smokeVolume) nearSegment(from, to r3.Vector, margin float64) bool {
+	lo := r3.Vector{X: v.origin.X - margin, Y: v.origin.Y - margin, Z: v.origin.Z - margin}
+	hi := r3.Vector{
+		X: v.origin.X + float64(v.dim[0])*v.size + margin,
+		Y: v.origin.Y + float64(v.dim[1])*v.size + margin,
+		Z: v.origin.Z + float64(v.dim[2])*v.size + margin,
+	}
+	_, _, ok := clipSegmentBox(from, to.Sub(from), lo, hi)
+	return ok
 }
 
 // clipSegmentBox intersects the segment origin+t*dir, t ∈ [0,1], with an
@@ -796,9 +959,12 @@ func (s *state) smokeOccluded(tick int, from, to r3.Vector) bool {
 	if len(s.smokes) == 0 {
 		return false
 	}
-	blasts := s.blastsAt(tick)
-	if len(blasts) > 0 {
+	clr := smokeClearing{blasts: s.blastsAt(tick), holes: s.holesAt(tick, from, to)}
+	if len(clr.blasts) > 0 {
 		s.blastQueries++
+	}
+	if len(clr.holes) > 0 {
+		s.holeQueries++
 	}
 	for i := range s.smokes {
 		c := &s.smokes[i]
@@ -807,14 +973,20 @@ func (s *state) smokeOccluded(tick int, from, to r3.Vector) bool {
 			continue
 		}
 		if c.vol != nil {
-			if c.vol.occludedSegment(from, to, c.center, r, blasts) {
+			if c.vol.occludedSegment(from, to, c.center, r, clr) {
 				s.smokeBlocks++
 				return true
 			}
-			// Would this sightline have been blocked without the explosions?
-			// That is the honest measure of what blasts change.
-			if len(blasts) > 0 && c.vol.occludedSegment(from, to, c.center, r, nil) {
-				s.blastLetTh++
+			// Would this sightline have been blocked without the explosions
+			// and bullet tunnels? That is the honest measure of what they
+			// change. A sightline still blocked with the blasts alone was
+			// opened by a tunnel.
+			if !clr.empty() && c.vol.occludedSegment(from, to, c.center, r, smokeClearing{}) {
+				if len(clr.holes) > 0 && c.vol.occludedSegment(from, to, c.center, r, smokeClearing{blasts: clr.blasts}) {
+					s.holeLetTh++
+				} else {
+					s.blastLetTh++
+				}
 			}
 			continue
 		}
@@ -850,4 +1022,5 @@ func (s *state) resetSmokes() {
 	s.smokes = s.smokes[:0]
 	s.smokeByEnt = map[int]int{}
 	s.blasts = s.blasts[:0]
+	s.holes = s.holes[:0]
 }

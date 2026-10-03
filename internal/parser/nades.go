@@ -287,7 +287,7 @@ type resolvedCloud struct {
 // density.
 func (c resolvedCloud) depth(from, to r3.Vector) float64 {
 	if c.vol != nil {
-		return c.vol.opticalDepth(from, to, c.center, c.radius, nil)
+		return c.vol.opticalDepth(from, to, c.center, c.radius, smokeClearing{})
 	}
 	// Sphere fallback: a chord through a uniformly dense ball. Expressed in the
 	// same cell-width units so a threshold means the same thing either way.

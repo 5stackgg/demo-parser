@@ -74,6 +74,8 @@ type state struct {
 	smokeByEnt map[int]int
 	// Explosions currently holding a hole open in the smoke.
 	blasts []smokeBlast
+	// Tracers that crossed a cloud this round, each a tunnel through it.
+	holes []bulletHole
 
 	// Live infernos, keyed by the library's unique id (entity ids get reused).
 	infernos          map[int]*infernoTrack
@@ -98,6 +100,10 @@ type state struct {
 	blastCount   int
 	blastLetTh   int
 	blastQueries int
+	// The same for bullet tunnels.
+	holeCount   int
+	holeLetTh   int
+	holeQueries int
 
 	// Door leaves reconstructed from entity state, re-scanned each round.
 	// Consulted by losAt because the collision mesh contains no doors.
@@ -328,9 +334,11 @@ func (s *state) finalize() {
 	fmt.Fprintf(
 		os.Stderr,
 		"[smoke] clouds=%d voxels=%d rays_blocked=%d collapsed=%d "+
-			"blasts=%d rays_during_blast=%d rays_saved_by_blast=%d\n",
+			"blasts=%d rays_during_blast=%d rays_saved_by_blast=%d "+
+			"holes=%d rays_near_hole=%d rays_saved_by_hole=%d\n",
 		s.smokeOpened, s.smokeVoxels, s.smokeBlocks, s.smokeSealed,
 		s.blastCount, s.blastQueries, s.blastLetTh,
+		s.holeCount, s.holeQueries, s.holeLetTh,
 	)
 	fmt.Fprintf(
 		os.Stderr,

@@ -14,11 +14,11 @@ func TestBlastOpensAHoleInSmoke(t *testing.T) {
 	from := r3.Vector{X: -400}
 	to := r3.Vector{X: 400}
 
-	if !v.occludedSegment(from, to, center, smokeRadius, nil) {
+	if !v.occludedSegment(from, to, center, smokeRadius, smokeClearing{}) {
 		t.Fatal("an intact cloud should block the sightline")
 	}
 	blast := []activeBlast{{center: center, radiusSq: heBlastRadius * heBlastRadius, fullSq: heBlastFullRadius * heBlastFullRadius}}
-	if v.occludedSegment(from, to, center, smokeRadius, blast) {
+	if v.occludedSegment(from, to, center, smokeRadius, smokeClearing{blasts: blast}) {
 		t.Fatal("a blast in the middle of the cloud should open a sightline through it")
 	}
 }
@@ -33,7 +33,7 @@ func TestBlastOnlyClearsItsOwnRadius(t *testing.T) {
 
 	from := r3.Vector{X: -400}
 	to := r3.Vector{X: 400}
-	if !v.occludedSegment(from, to, center, smokeRadius, blast) {
+	if !v.occludedSegment(from, to, center, smokeRadius, smokeClearing{blasts: blast}) {
 		t.Fatal("a blast away from the sightline should leave the cloud blocking it")
 	}
 }

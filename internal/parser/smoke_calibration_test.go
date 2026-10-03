@@ -83,7 +83,7 @@ func TestCloudExtentIsWiderThanItIsTall(t *testing.T) {
 func TestCoreBlocksAndRimDoesNot(t *testing.T) {
 	v, center := openSpaceVolume(t)
 
-	through := v.opticalDepth(r3.Vector{X: -500}, r3.Vector{X: 500}, center, smokeRadius, nil)
+	through := v.opticalDepth(r3.Vector{X: -500}, r3.Vector{X: 500}, center, smokeRadius, smokeClearing{})
 	if through < blockingDepth {
 		t.Fatalf("a sightline through the core has depth %.2f, expected it to block (>= %.1f)",
 			through, blockingDepth)
@@ -93,7 +93,7 @@ func TestCoreBlocksAndRimDoesNot(t *testing.T) {
 	rim := v.opticalDepth(
 		r3.Vector{X: -500, Y: smokeRadius * 0.9},
 		r3.Vector{X: 500, Y: smokeRadius * 0.9},
-		center, smokeRadius, nil)
+		center, smokeRadius, smokeClearing{})
 	if rim >= blockingDepth {
 		t.Fatalf("a sightline clipping the rim has depth %.2f, expected it not to block", rim)
 	}

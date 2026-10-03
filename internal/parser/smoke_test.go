@@ -172,7 +172,7 @@ func TestOpticalDepthMatchesBruteForce(t *testing.T) {
 	}
 
 	for n, sg := range seeds {
-		got := v.opticalDepth(sg.from, sg.to, r3.Vector{X: -40}, smokeRadius*4, nil)
+		got := v.opticalDepth(sg.from, sg.to, r3.Vector{X: -40}, smokeRadius*4, smokeClearing{})
 		want := bruteForceDepth(v, sg.from, sg.to)
 		// Sampling has its own quantisation, so allow a small absolute slack on
 		// top of a relative tolerance.
@@ -197,10 +197,10 @@ func TestSmokeBloomRamp(t *testing.T) {
 	// has grown past 100 of its 144 units.
 	from := r3.Vector{X: -400, Y: 100}
 	to := r3.Vector{X: 400, Y: 100}
-	if v.occludedSegment(from, to, center, 40, nil) {
+	if v.occludedSegment(from, to, center, 40, smokeClearing{}) {
 		t.Fatal("a smoke that has just popped should not yet cover the sightline")
 	}
-	if !v.occludedSegment(from, to, center, smokeRadius, nil) {
+	if !v.occludedSegment(from, to, center, smokeRadius, smokeClearing{}) {
 		t.Fatal("a fully grown smoke should cover the sightline")
 	}
 }

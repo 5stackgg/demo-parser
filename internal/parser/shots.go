@@ -345,11 +345,19 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 	s.ensureMesh()
 	if s.mesh != nil {
 		dir := viewVector(yaw, pitch)
+		reach := bulletReach
 		if dist, ok := s.mesh.RayHitDist(eye, dir); ok && dist > 0 {
 			ev.MissX = f32ptr(eye.X + dir.X*dist)
 			ev.MissY = f32ptr(eye.Y + dir.Y*dist)
 			ev.MissZ = f32ptr(eye.Z + dir.Z*dist)
+			reach = math.Min(dist, bulletReach)
 		}
+		// The same tracer bores a tunnel through any smoke it crosses, up to
+		// the first wall (penetration is not modelled, so smoke beyond a
+		// wallbang keeps no tunnel). Recorded after the enemySpotted check
+		// above: a shot cannot have been aimed down the hole it is about to
+		// make.
+		s.recordBulletHole(curTick, eye, eye.Add(dir.Mul(reach)))
 	}
 
 	s.res.ShotsFired = append(s.res.ShotsFired, ev)
