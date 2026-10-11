@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,12 @@ const (
 	MaxLimit       = 200
 	DefaultBudget  = 5 * time.Second
 	MaxBudget      = 30 * time.Second
+
+	// No map is bigger than this in any direction, and nothing a player can
+	// stand on is further out. Requests outside it are not searched.
+	worldExtent = 65536.0
+	// The widest area one search covers, per side.
+	maxAreaSide = 4096.0
 
 	// A player is 72 units tall and 32 across.
 	playerHeight = 72.0
@@ -75,29 +82,65 @@ type Request struct {
 	BudgetMs   int         `json:"budget_ms,omitempty"`
 }
 
-// Validate fills the defaults and refuses what cannot be searched.
+func inWorld(p r3.Vector) bool {
+	for _, c := range [3]float64{p.X, p.Y, p.Z} {
+		if math.IsNaN(c) || math.IsInf(c, 0) || math.Abs(c) > worldExtent {
+			return false
+		}
+	}
+	return true
+}
+
+// Validate fills the defaults and refuses what cannot be searched. The work a
+// search does is stands x techniques x strengths, so each of those is bounded
+// here, and duplicates are dropped rather than searched twice.
 func (r *Request) Validate() error {
-	if r.Radius <= 0 || r.Radius > 512 {
+	if math.IsNaN(r.Radius) || r.Radius <= 0 || r.Radius > 512 {
 		return errors.New("radius must be between 0 and 512")
+	}
+	if !inWorld(r.Target) || !inWorld(r.Area.Min) || !inWorld(r.Area.Max) {
+		return errors.New("target and area must be finite points on the map")
 	}
 	if r.Area.Max.X < r.Area.Min.X || r.Area.Max.Y < r.Area.Min.Y || r.Area.Max.Z < r.Area.Min.Z {
 		return errors.New("area max must not be below its min")
 	}
-	if len(r.Techniques) == 0 || len(r.Techniques) > MaxTechniques {
-		return fmt.Errorf("between 1 and %d techniques", MaxTechniques)
+	if r.Area.Max.X-r.Area.Min.X > maxAreaSide || r.Area.Max.Y-r.Area.Min.Y > maxAreaSide {
+		return fmt.Errorf("area must be at most %.0f units a side", maxAreaSide)
 	}
+	if math.IsNaN(r.Area.Radius) || r.Area.Radius < 0 || r.Area.Radius > maxAreaSide {
+		return errors.New("area radius must be between 0 and the area's size")
+	}
+
+	techniques := make([]Technique, 0, len(r.Techniques))
 	for _, t := range r.Techniques {
 		if !t.valid() {
 			return fmt.Errorf("technique %+v is not one a player can do", t)
 		}
+		if !slices.Contains(techniques, t) {
+			techniques = append(techniques, t)
+		}
 	}
-	if len(r.Strengths) == 0 {
-		r.Strengths = []Strength{Full}
+	if len(techniques) == 0 || len(techniques) > MaxTechniques {
+		return fmt.Errorf("between 1 and %d techniques", MaxTechniques)
 	}
+	r.Techniques = techniques
+
+	strengths := make([]Strength, 0, 3)
 	for _, s := range r.Strengths {
 		if !s.valid() {
 			return fmt.Errorf("strength %q is not Full, Half or Drop", s)
 		}
+		if !slices.Contains(strengths, s) {
+			strengths = append(strengths, s)
+		}
+	}
+	if len(strengths) == 0 {
+		strengths = append(strengths, Full)
+	}
+	r.Strengths = strengths
+
+	if math.IsNaN(r.Spacing) || math.IsInf(r.Spacing, 0) || r.Spacing < 0 {
+		return errors.New("spacing must be a positive number of units")
 	}
 	if r.Spacing == 0 {
 		r.Spacing = DefaultSpacing
@@ -170,18 +213,24 @@ func Stands(world *geometry.GrenadeWorld, area Area, spacing float64) []r3.Vecto
 	if hull == nil {
 		return nil
 	}
-	for {
-		nx := int(math.Floor((area.Max.X-area.Min.X)/spacing)) + 1
-		ny := int(math.Floor((area.Max.Y-area.Min.Y)/spacing)) + 1
-		if nx*ny <= MaxStands*4 {
-			break
-		}
+	if !inWorld(area.Min) || !inWorld(area.Max) || !(spacing > 0) {
+		return nil
+	}
+	// Counted, not stepped: a float walked from one bound to the other can
+	// stop moving long before it gets there.
+	nx := int(math.Floor((area.Max.X-area.Min.X)/spacing)) + 1
+	ny := int(math.Floor((area.Max.Y-area.Min.Y)/spacing)) + 1
+	for nx*ny > MaxStands*4 {
 		spacing *= 1.5
+		nx = int(math.Floor((area.Max.X-area.Min.X)/spacing)) + 1
+		ny = int(math.Floor((area.Max.Y-area.Min.Y)/spacing)) + 1
 	}
 	centre := area.Min.Add(area.Max).Mul(0.5)
 	var out []r3.Vector
-	for x := area.Min.X; x <= area.Max.X+1e-6; x += spacing {
-		for y := area.Min.Y; y <= area.Max.Y+1e-6; y += spacing {
+	for i := 0; i < nx; i++ {
+		x := area.Min.X + float64(i)*spacing
+		for j := 0; j < ny; j++ {
+			y := area.Min.Y + float64(j)*spacing
 			if area.Radius > 0 && math.Hypot(x-centre.X, y-centre.Y) > area.Radius {
 				continue
 			}

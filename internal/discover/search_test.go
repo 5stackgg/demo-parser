@@ -151,6 +151,12 @@ func TestARequestWithoutAnswersIsRefused(t *testing.T) {
 		"a move with no speed": func(r *Request) { r.Techniques = []Technique{{Direction: Forward}} },
 		"a made-up button":     func(r *Request) { r.Strengths = []Strength{"Middle"} },
 	}
+	cases["a target off the map"] = func(r *Request) { r.Target = v(1e30, 0, 0) }
+	cases["a NaN in the area"] = func(r *Request) { r.Area.Min.X = math.NaN() }
+	cases["an infinite area"] = func(r *Request) { r.Area.Max.Y = math.Inf(1) }
+	cases["an area wider than any map"] = func(r *Request) { r.Area.Max.X = 5000 }
+	cases["a NaN spacing"] = func(r *Request) { r.Spacing = math.NaN() }
+	cases["a NaN radius"] = func(r *Request) { r.Radius = math.NaN() }
 	for name, mutate := range cases {
 		r := good()
 		mutate(&r)
@@ -161,6 +167,36 @@ func TestARequestWithoutAnswersIsRefused(t *testing.T) {
 	r := good()
 	if err := r.Validate(); err != nil || r.Spacing != DefaultSpacing || r.Limit != DefaultLimit || len(r.Strengths) != 1 {
 		t.Fatalf("defaults: %+v, %v", r, err)
+	}
+}
+
+// The work a search does is stands x techniques x strengths, so a request
+// cannot buy more of it by repeating itself.
+func TestRepeatsInARequestAreSearchedOnce(t *testing.T) {
+	r := Request{
+		Map:        "de_test",
+		Radius:     40,
+		Area:       Area{Min: v(0, 0, 0), Max: v(10, 10, 10)},
+		Techniques: make([]Technique, 1000),
+		Strengths:  make([]Strength, 0, 5000),
+	}
+	for i := 0; i < 5000; i++ {
+		r.Strengths = append(r.Strengths, Full)
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Techniques) != 1 || len(r.Strengths) != 1 {
+		t.Fatalf("%d techniques and %d strengths after validation", len(r.Techniques), len(r.Strengths))
+	}
+}
+
+// Far from the origin a float stepped by the spacing stops moving; the stands
+// are counted instead, so this returns.
+func TestStandsAtTheEdgeOfTheWorldTerminate(t *testing.T) {
+	world := synthWorld(t, rect(-3000, 3000, -3000, 3000, 0))
+	if got := Stands(world, Area{Min: v(1e300, 1e300, 0), Max: v(1e300, 1e300, 10)}, 32); got != nil {
+		t.Fatalf("an area off the map has no stands, got %d", len(got))
 	}
 }
 
