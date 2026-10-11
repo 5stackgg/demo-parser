@@ -249,3 +249,33 @@ func TestStandsStayInTheArea(t *testing.T) {
 	}
 	_ = r3.Vector{}
 }
+
+// A ray down sees a slab's underside as a floor too; it is not one, because
+// the slab's own top is right above it.
+func TestFloorsDownSkipsASlabsUnderside(t *testing.T) {
+	tris := rect(-500, 500, -500, 500, 0)
+	tris = append(tris, rect(-500, 500, -500, 500, 300)...)
+	tris = append(tris, rect(-500, 500, -500, 500, 284)...)
+	world := synthWorld(t, tris)
+
+	floors := floorsDown(world.Hull(), 0, 0, 1000, -100)
+	if len(floors) != 2 || floors[0] != 300 || floors[1] != 0 {
+		t.Fatalf("floors %v, want [300 0]", floors)
+	}
+}
+
+func TestFloorNearPicksTheFloorClosestToTheGuess(t *testing.T) {
+	tris := rect(-500, 500, -500, 500, 0)
+	tris = append(tris, rect(-500, 500, -500, 500, 300)...)
+	world := synthWorld(t, tris)
+
+	if z, ok := FloorNear(world, 0, 0, 90); !ok || z != 0 {
+		t.Fatalf("a guess near the ground gives %v %v, want 0", z, ok)
+	}
+	if z, ok := FloorNear(world, 0, 0, 220); !ok || z != 300 {
+		t.Fatalf("a guess near the upper floor gives %v %v, want 300", z, ok)
+	}
+	if _, ok := FloorNear(world, 4000, 4000, 0); ok {
+		t.Fatal("a point off the map has no floor")
+	}
+}

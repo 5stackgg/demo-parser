@@ -80,7 +80,11 @@ type Request struct {
 	Strengths  []Strength  `json:"strengths"`
 	Spacing    float64     `json:"spacing,omitempty"`
 	Limit      int         `json:"limit,omitempty"`
-	BudgetMs   int         `json:"budget_ms,omitempty"`
+	// Snap puts the target, and every stand, on the floor nearest the height
+	// given for it, for a caller that picked them off a radar and has only a
+	// guess at the height.
+	Snap     bool `json:"snap,omitempty"`
+	BudgetMs int  `json:"budget_ms,omitempty"`
 }
 
 func inWorld(p r3.Vector) bool {
@@ -254,6 +258,8 @@ type Response struct {
 	Searched   int         `json:"searched"`
 	Truncated  bool        `json:"truncated"`
 	Revision   string      `json:"revision"`
+	// Target is the spot searched for, snapped to its floor when asked.
+	Target point `json:"target"`
 }
 
 // stance is a spot in the area a player can stand.
@@ -265,6 +271,12 @@ type stance struct {
 // range names, at the request's spacing (widened until there are no more than
 // MaxStands).
 func Stands(world *geometry.GrenadeWorld, area Area, spacing float64) []r3.Vector {
+	return standsIn(world, area, spacing, false)
+}
+
+// standsIn with snap stands each spot on the floor nearest the middle of the
+// area's Z range rather than the first one down from its top.
+func standsIn(world *geometry.GrenadeWorld, area Area, spacing float64, snap bool) []r3.Vector {
 	hull := world.Hull()
 	if hull == nil {
 		return nil
@@ -297,7 +309,13 @@ func Stands(world *geometry.GrenadeWorld, area Area, spacing float64) []r3.Vecto
 			if area.Radius > 0 && math.Hypot(x-centre.X, y-centre.Y) > area.Radius {
 				continue
 			}
-			feet, ok := floorAt(hull, x, y, area.Min.Z, area.Max.Z)
+			var feet r3.Vector
+			var ok bool
+			if snap {
+				feet, ok = floorNearAt(hull, x, y, area.Min.Z, area.Max.Z, centre.Z)
+			} else {
+				feet, ok = floorAt(hull, x, y, area.Min.Z, area.Max.Z)
+			}
 			if !ok || !fits(hull, feet) {
 				continue
 			}
@@ -335,6 +353,81 @@ func floorAt(hull *geometry.Mesh, x, y, minZ, maxZ float64) (r3.Vector, bool) {
 			continue
 		}
 		best = math.Max(best, z)
+	}
+	if math.IsInf(best, -1) {
+		return r3.Vector{}, false
+	}
+	return r3.Vector{X: x, Y: y, Z: best}, true
+}
+
+// ErrNoFloor is a snapped search whose target has no floor near it.
+var ErrNoFloor = errors.New("there is no floor under that spot")
+
+// snapReach is how far above and below its given height a point is looked for
+// a floor.
+const snapReach = 768
+
+// floorGap is the air a face needs above it to be a floor. A ray down reports
+// every horizontal face as facing up, a slab's underside included; the face
+// above that one is the slab's own top, a few units away.
+const floorGap = 24
+
+// floorsDown lists the floors in a column between top and bottom, highest
+// first.
+func floorsDown(hull *geometry.Mesh, x, y, top, bottom float64) []float64 {
+	var floors []float64
+	from := top
+	above := math.Inf(1)
+	for i := 0; i < 32 && from > bottom; i++ {
+		hit, ok := hull.RayHitSurface(r3.Vector{X: x, Y: y, Z: from}, r3.Vector{Z: -1})
+		if !ok {
+			break
+		}
+		z := from - hit.Distance
+		if z < bottom {
+			break
+		}
+		if hit.Normal.Z >= 0.7 && above-z >= floorGap {
+			floors = append(floors, z)
+		}
+		above = z
+		from = z - 0.25
+	}
+	return floors
+}
+
+func nearest(floors []float64, minZ, maxZ, near float64) (float64, bool) {
+	best, found := 0.0, false
+	for _, z := range floors {
+		if z < minZ || z > maxZ {
+			continue
+		}
+		if !found || math.Abs(z-near) < math.Abs(best-near) {
+			best, found = z, true
+		}
+	}
+	return best, found
+}
+
+// FloorNear is the floor under (x, y) nearest the height z.
+func FloorNear(world *geometry.GrenadeWorld, x, y, z float64) (float64, bool) {
+	hull := world.Hull()
+	if hull == nil || !inWorld(r3.Vector{X: x, Y: y, Z: z}) {
+		return 0, false
+	}
+	return nearest(floorsDown(hull, x, y, z+snapReach, z-snapReach), z-snapReach, z+snapReach, z)
+}
+
+// floorNearAt is floorAt choosing, in each column under the player, the floor
+// nearest a height rather than the first one down.
+func floorNearAt(hull *geometry.Mesh, x, y, minZ, maxZ, near float64) (r3.Vector, bool) {
+	best := math.Inf(-1)
+	inset := playerHalf - 1
+	for _, off := range [5][2]float64{{0, 0}, {inset, inset}, {inset, -inset}, {-inset, inset}, {-inset, -inset}} {
+		floors := floorsDown(hull, x+off[0], y+off[1], maxZ+playerHeight, minZ-8)
+		if z, ok := nearest(floors, minZ-8, maxZ+8, near); ok {
+			best = math.Max(best, z)
+		}
 	}
 	if math.IsInf(best, -1) {
 		return r3.Vector{}, false
@@ -577,7 +670,15 @@ func Search(ctx context.Context, world *geometry.GrenadeWorld, req Request, work
 	ctx, cancel := context.WithTimeout(ctx, req.budget())
 	defer cancel()
 
-	stands := Stands(world, req.Area, req.Spacing)
+	if req.Snap {
+		z, ok := FloorNear(world, req.Target.X, req.Target.Y, req.Target.Z)
+		if !ok {
+			return Response{}, ErrNoFloor
+		}
+		req.Target.Z = z
+	}
+
+	stands := standsIn(world, req.Area, req.Spacing, req.Snap)
 	// Closest to the target first: when the budget runs out, the spots
 	// nearest the smoke have been searched.
 	sort.SliceStable(stands, func(i, j int) bool {
@@ -641,6 +742,7 @@ feed:
 		Searched:   done,
 		Truncated:  done < len(specs),
 		Revision:   world.Revision(),
+		Target:     wire(req.Target),
 	}, nil
 }
 

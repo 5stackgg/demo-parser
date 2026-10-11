@@ -116,3 +116,64 @@ func TestDiscoverEndpointWritesLowercasePoints(t *testing.T) {
 		}
 	}
 }
+
+// A spot picked off a radar has no real height. Snapped, a guess 90 units off
+// still finds the throws onto the floor there; unsnapped it finds none.
+func TestDiscoverEndpointSnapsAGuessedHeightToTheFloor(t *testing.T) {
+	t.Setenv("MAP_MESH_CACHE", "4")
+	revision := openGround(t)
+
+	req := discoverRequest(revision)
+	req.Target.Z = 90
+	req.Area.Min.Z, req.Area.Max.Z = -200, 200
+
+	w := post(t, handleDiscover, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var unsnapped discover.Response
+	if err := json.Unmarshal(w.Body.Bytes(), &unsnapped); err != nil {
+		t.Fatal(err)
+	}
+	if len(unsnapped.Candidates) != 0 {
+		t.Fatalf("unsnapped, %d candidates land 90 units under the target", len(unsnapped.Candidates))
+	}
+
+	req.Snap = true
+	w = post(t, handleDiscover, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Candidates []map[string]any `json:"candidates"`
+		Target     struct{ X, Y, Z float64 }
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Candidates) == 0 || res.Target.Z != 0 {
+		t.Fatalf("snapped: %d candidates, target z %v", len(res.Candidates), res.Target.Z)
+	}
+}
+
+func TestFloorEndpoint(t *testing.T) {
+	t.Setenv("MAP_MESH_CACHE", "4")
+	revision := openGround(t)
+
+	w := post(t, handleFloor, floorRequest{Map: "de_clip", Revision: revision, X: 10, Y: 10, Z: 64})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var res floorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found || res.Z != 0 {
+		t.Fatalf("floor %+v, want found at 0", res)
+	}
+
+	w = post(t, handleFloor, floorRequest{Map: "de_clip", Revision: revision, X: 9000, Y: 9000, Z: 0})
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || res.Found {
+		t.Fatalf("off the map: %+v %v", res, err)
+	}
+}

@@ -15,8 +15,9 @@
 //	                                            a smoke.
 //	                      POST /drift         — which lineups a map update moved.
 //	                      POST /discover      — throws that land on a spot.
+//	                      POST /floor         — the floor under a picked point.
 //
-// The last five answer questions about a map rather than a demo, for the
+// The last six answer questions about a map rather than a demo, for the
 // lineup library; see cmd/server/nades.go, drift.go and discover.go.
 //
 // Default (no arg) is `server` for backwards compatibility with old

@@ -96,3 +96,49 @@ func handleDiscover(w http.ResponseWriter, r *http.Request) {
 		req.Map, res.Stands, res.Flights, len(res.Candidates), map[bool]string{true: " (budget ran out)", false: ""}[res.Truncated])
 	writeJSON(w, res)
 }
+
+// POST /floor — the floor under a point nearest the height given for it, for a
+// caller that picked the point off a radar and has only a guess at the height.
+
+type floorRequest struct {
+	Map      string  `json:"map"`
+	Revision string  `json:"revision,omitempty"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Z        float64 `json:"z"`
+}
+
+type floorResponse struct {
+	Found bool    `json:"found"`
+	Z     float64 `json:"z"`
+}
+
+func handleFloor(w http.ResponseWriter, r *http.Request) {
+	var req floorRequest
+	if !decodeGeometryRequest(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Map) == "" {
+		http.Error(w, "map is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := geometry.ResolveMeshRevision(req.Revision); err != nil {
+		http.Error(w, fmt.Sprintf("revision: %v", err), http.StatusBadRequest)
+		return
+	}
+	world, err := grenadeWorld(req.Map, req.Revision)
+	if err != nil {
+		var upstream errUpstream
+		switch {
+		case errors.Is(err, simulate.ErrNoMesh):
+			http.Error(w, fmt.Sprintf("no collision mesh for %s", req.Map), http.StatusNotFound)
+		case errors.As(err, &upstream):
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	z, found := discover.FloorNear(world, req.X, req.Y, req.Z)
+	writeJSON(w, floorResponse{Found: found, Z: z})
+}
