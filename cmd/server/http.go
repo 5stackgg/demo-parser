@@ -37,6 +37,7 @@ func runServer() {
 	mux.HandleFunc("/sightlines", handleSightlines)
 	mux.HandleFunc("/oneway", handleOneway)
 	mux.HandleFunc("/drift", handleDrift)
+	mux.HandleFunc("/discover", handleDiscover)
 
 	srv := &http.Server{
 		Addr:              addr,

@@ -14,9 +14,10 @@
 //	                      POST /oneway        — asymmetric visibility through
 //	                                            a smoke.
 //	                      POST /drift         — which lineups a map update moved.
+//	                      POST /discover      — throws that land on a spot.
 //
-// The last four answer questions about a map rather than a demo, for the
-// lineup library; see cmd/server/nades.go and cmd/server/drift.go.
+// The last five answer questions about a map rather than a demo, for the
+// lineup library; see cmd/server/nades.go, drift.go and discover.go.
 //
 // Default (no arg) is `server` for backwards compatibility with old
 // docker images that ENTRYPOINT'd the binary directly.
