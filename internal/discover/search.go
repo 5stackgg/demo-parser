@@ -213,9 +213,16 @@ func Stands(world *geometry.GrenadeWorld, area Area, spacing float64) []r3.Vecto
 	if hull == nil {
 		return nil
 	}
-	if !inWorld(area.Min) || !inWorld(area.Max) || !(spacing > 0) {
+	// Bounded here as well as in Validate: this is exported, and the grid it
+	// walks is the one thing in a search that grows with its inputs.
+	if !inWorld(area.Min) || !inWorld(area.Max) || math.IsNaN(spacing) {
 		return nil
 	}
+	if area.Max.X-area.Min.X > maxAreaSide || area.Max.Y-area.Min.Y > maxAreaSide ||
+		area.Max.X < area.Min.X || area.Max.Y < area.Min.Y {
+		return nil
+	}
+	spacing = math.Max(spacing, MinSpacing)
 	// Counted, not stepped: a float walked from one bound to the other can
 	// stop moving long before it gets there.
 	nx := int(math.Floor((area.Max.X-area.Min.X)/spacing)) + 1

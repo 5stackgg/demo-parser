@@ -198,6 +198,12 @@ func TestStandsAtTheEdgeOfTheWorldTerminate(t *testing.T) {
 	if got := Stands(world, Area{Min: v(1e300, 1e300, 0), Max: v(1e300, 1e300, 10)}, 32); got != nil {
 		t.Fatalf("an area off the map has no stands, got %d", len(got))
 	}
+	if got := Stands(world, Area{Min: v(-2000, -2000, -32), Max: v(2000, 2000, 32)}, 1e-300); len(got) > MaxStands {
+		t.Fatalf("a vanishing spacing still gives at most %d stands, got %d", MaxStands, len(got))
+	}
+	if got := Stands(world, Area{Min: v(-2900, -2900, -32), Max: v(2900, 2900, 32)}, 32); got != nil {
+		t.Fatalf("an area wider than a search covers has no stands, got %d", len(got))
+	}
 }
 
 // What runs out of time says so, and returns what it had.
@@ -237,7 +243,7 @@ func TestStandsStayInTheArea(t *testing.T) {
 			t.Fatalf("%v is outside the circle", s)
 		}
 	}
-	many := Stands(world, Area{Min: v(-2900, -2900, -32), Max: v(2900, 2900, 32)}, 8)
+	many := Stands(world, Area{Min: v(-2000, -2000, -32), Max: v(2000, 2000, 32)}, 8)
 	if len(many) > MaxStands {
 		t.Fatalf("%d stands, more than %d", len(many), MaxStands)
 	}
