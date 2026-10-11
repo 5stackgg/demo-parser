@@ -72,6 +72,10 @@ type state struct {
 	// Consulted by losAt so every sightline-gated stat accounts for smoke.
 	smokes     []smokeCloud
 	smokeByEnt map[int]int
+	// Voxel logs being read off live smoke projectiles, by entity id.
+	voxelTracks   map[int]*smokeVoxelTrack
+	voxelSkipped  int
+	voxelBoxCells int
 	// Explosions currently holding a hole open in the smoke.
 	blasts []smokeBlast
 
@@ -195,6 +199,7 @@ func Parse(r io.Reader) (*Result, error) {
 		fovEntry:     map[string]map[string]visEntry{},
 		fovLosProbe:  map[[2]string]int{},
 		smokeByEnt:   map[int]int{},
+		voxelTracks:  map[int]*smokeVoxelTrack{},
 		infernos:     map[int]*infernoTrack{},
 		doorSeen:     map[int]bool{},
 		eyeHistory:   map[string][]eyeSample{},
@@ -338,6 +343,14 @@ func (s *state) finalize() {
 			"skipped(no_bounds=%d degenerate=%d no_origin=%d)\n",
 		len(s.doorSeen), s.doorsTracked, s.doorsMoved, s.doorBlocks,
 		s.doorsNoBounds, s.doorsDegenerate, s.doorsNoOrigin,
+	)
+
+	s.closeAllSmokeVoxels(s.maxTick)
+	s.sortSmokeVoxels()
+	fmt.Fprintf(
+		os.Stderr,
+		"[smoke-voxels] clouds=%d skipped=%d cells=%d\n",
+		len(s.res.SmokeVoxels), s.voxelSkipped, s.voxelBoxCells,
 	)
 
 	s.flushInfernos()

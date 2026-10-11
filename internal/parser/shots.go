@@ -69,6 +69,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 
 	s.updateDoors()
 	s.trackInfernos()
+	s.pollSmokeVoxels()
 	s.trackFOV()
 	s.trackEngagements()
 

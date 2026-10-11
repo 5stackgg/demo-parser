@@ -733,16 +733,18 @@ func (s *state) onSmokeStart(e events.SmokeStart) {
 		gid = s.res.GrenadeDetonations[n-1].GrenadeID
 	}
 	s.openSmoke(e.GrenadeEntityID, e.Position, gid)
+	s.openSmokeVoxels(e.GrenadeEntityID, gid)
 }
 
 // onSmokeExpired closes the cloud. The engine fires this when the smoke has
 // completely faded, which is a better lifetime than any constant we would pick.
 func (s *state) onSmokeExpired(e events.SmokeExpired) {
+	tick := s.parser.GameState().IngameTick()
+	s.closeSmokeVoxels(e.GrenadeEntityID, tick)
 	idx, ok := s.smokeByEnt[e.GrenadeEntityID]
 	if !ok || idx >= len(s.smokes) {
 		return
 	}
-	tick := s.parser.GameState().IngameTick()
 	s.smokes[idx].endTick = tick
 	if x := s.smokes[idx].exportIdx; x >= 0 && x < len(s.res.SmokeVolumes) {
 		s.res.SmokeVolumes[x].EndTick = tick
@@ -847,6 +849,7 @@ func segmentSphereIntersects(from, to, center r3.Vector, radius float64) bool {
 // resetSmokes drops every cloud at round boundaries. Projectiles are removed
 // between rounds without always firing SmokeExpired.
 func (s *state) resetSmokes() {
+	s.closeAllSmokeVoxels(s.parser.GameState().IngameTick())
 	s.smokes = s.smokes[:0]
 	s.smokeByEnt = map[int]int{}
 	s.blasts = s.blasts[:0]
