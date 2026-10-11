@@ -16,6 +16,7 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	}
 	tickRate := s.parser.TickRate()
 	s.tickRate = tickRate
+	s.resolveHits()
 	curTick := s.parser.GameState().IngameTick()
 	seen := map[string]bool{}
 	for _, p := range s.parser.GameState().Participants().Playing() {
@@ -355,7 +356,6 @@ func (s *state) onWeaponFire(e events.WeaponFire) {
 
 	s.res.ShotsFired = append(s.res.ShotsFired, ev)
 	idx := len(s.res.ShotsFired) - 1
-	s.lastShot[attackerID] = shotMark{tick: curTick, isSpray: isSpray, enemySpotted: enemySpotted, idx: idx}
-	s.pendingShots[attackerID] = append(s.pendingShots[attackerID], idx)
+	s.lastShot[attackerID] = shotMark{tick: curTick, idx: idx}
 	s.recordEngagementShot(attackerID, eye, yaw, pitch, ev.Weapon)
 }

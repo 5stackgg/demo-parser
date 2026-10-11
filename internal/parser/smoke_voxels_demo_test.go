@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
@@ -33,19 +34,35 @@ var testDemoSmokes = []struct{ start, end int }{
 	{14690, 14948},
 }
 
-func TestParseExportsSmokeVoxels(t *testing.T) {
+var (
+	testDemoOnce   sync.Once
+	testDemoResult *Result
+	testDemoErr    error
+)
+
+// parseTestDemo parses test.dem once for every test that reads the result.
+// No mesh, so the parse stays offline; nothing read from it needs one.
+func parseTestDemo(t *testing.T) *Result {
+	t.Helper()
 	path := testDemo(t)
-	// No mesh: the voxel log needs none, and the parse stays offline.
-	t.Setenv("MAP_MESH_CDN", "")
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
+	testDemoOnce.Do(func() {
+		t.Setenv("MAP_MESH_CDN", "")
+		f, err := os.Open(path)
+		if err != nil {
+			testDemoErr = err
+			return
+		}
+		defer f.Close()
+		testDemoResult, testDemoErr = Parse(f)
+	})
+	if testDemoErr != nil {
+		t.Fatal(testDemoErr)
 	}
-	defer f.Close()
-	res, err := Parse(f)
-	if err != nil {
-		t.Fatal(err)
-	}
+	return testDemoResult
+}
+
+func TestParseExportsSmokeVoxels(t *testing.T) {
+	res := parseTestDemo(t)
 	if res.SchemaVersion != 3 {
 		t.Errorf("schema_version %d, want 3", res.SchemaVersion)
 	}

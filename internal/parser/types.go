@@ -321,8 +321,8 @@ type EventDamage struct {
 	Hitgroup        int    `json:"hitgroup,omitempty"`
 	Health          int    `json:"health,omitempty"`
 	HitOnSpotted    bool   `json:"hit_on_spotted,omitempty"`
-	// FromSpray: the attacker's most-recent shot was a spray shot and
-	// fired close enough to this damage to plausibly have produced it.
+	// FromSpray: the shot behind this damage was a spray shot — it followed
+	// the attacker's previous shot within 250ms — fired with an enemy in sight.
 	FromSpray         bool     `json:"from_spray,omitempty"`
 	SpotToDamageS     *float64 `json:"spot_to_damage,omitempty"`
 	CrosshairDeltaDeg *float32 `json:"crosshair_delta_deg,omitempty"`
@@ -512,13 +512,11 @@ type visEntry struct {
 	targetView r3.Vector
 }
 
-// shotMark records the attacker's last shot tick + whether that shot
-// was a spray shot. PlayerHurt attributes a damage to the most-recent
-// shot to inherit the spray flag.
+// shotMark records the attacker's last shot. The next shot reads it to tell a
+// spray from a tap, and a bullet's damage with no shot on its own tick falls
+// back to it.
 type shotMark struct {
-	tick         int
-	isSpray      bool
-	enemySpotted bool
+	tick int
 	// idx is the position of this shot in Result.ShotsFired, so a later
 	// matching PlayerHurt can backfill the shot's hit/headshot result.
 	idx int
