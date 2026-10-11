@@ -88,3 +88,31 @@ func TestDiscoverEndpointRejectsNonPost(t *testing.T) {
 		t.Fatalf("status %d", w.Code)
 	}
 }
+
+func TestDiscoverEndpointWritesLowercasePoints(t *testing.T) {
+	t.Setenv("MAP_MESH_CACHE", "4")
+	w := post(t, handleDiscover, discoverRequest(openGround(t)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Candidates []map[string]any `json:"candidates"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Candidates) == 0 {
+		t.Fatal("no candidates")
+	}
+	for _, field := range []string{"stand", "eye", "position", "velocity", "landing"} {
+		v, ok := res.Candidates[0][field].(map[string]any)
+		if !ok {
+			t.Fatalf("%s is %T", field, res.Candidates[0][field])
+		}
+		for _, axis := range []string{"x", "y", "z"} {
+			if _, ok := v[axis].(float64); !ok {
+				t.Fatalf("%s has no %q: %v", field, axis, v)
+			}
+		}
+	}
+}

@@ -2,6 +2,7 @@ package discover
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -188,6 +189,61 @@ type Candidate struct {
 	// Spread is how far the landing moves for a quarter of a degree of aim
 	// error either way: the lower, the easier the throw.
 	Spread float64 `json:"spread"`
+}
+
+// point is a vector as it goes over the wire. r3.Vector has no JSON tags, so
+// it would go out as X/Y/Z, and every reader of this expects x/y/z.
+type point struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
+}
+
+func wire(v r3.Vector) point {
+	return point{X: v.X, Y: v.Y, Z: v.Z}
+}
+
+// MarshalJSON writes the vectors as points, and a spread that could not be
+// measured (a jittered throw that never settled) as null: encoding/json
+// refuses +Inf and would fail the whole response.
+func (c Candidate) MarshalJSON() ([]byte, error) {
+	var spread *float64
+	if !math.IsInf(c.Spread, 0) && !math.IsNaN(c.Spread) {
+		spread = &c.Spread
+	}
+	return json.Marshal(struct {
+		Stand     point     `json:"stand"`
+		Eye       point     `json:"eye"`
+		Technique Technique `json:"technique"`
+		Name      string    `json:"technique_name"`
+		Measured  bool      `json:"measured"`
+		Strength  Strength  `json:"strength"`
+		Pitch     float64   `json:"pitch"`
+		Yaw       float64   `json:"yaw"`
+		Position  point     `json:"position"`
+		Velocity  point     `json:"velocity"`
+		Landing   point     `json:"landing"`
+		Distance  float64   `json:"distance"`
+		Bounces   int       `json:"bounces"`
+		Seconds   float64   `json:"seconds"`
+		Spread    *float64  `json:"spread"`
+	}{
+		Stand:     wire(c.Stand),
+		Eye:       wire(c.Eye),
+		Technique: c.Technique,
+		Name:      c.Name,
+		Measured:  c.Measured,
+		Strength:  c.Strength,
+		Pitch:     c.Pitch,
+		Yaw:       c.Yaw,
+		Position:  wire(c.Position),
+		Velocity:  wire(c.Velocity),
+		Landing:   wire(c.Landing),
+		Distance:  c.Distance,
+		Bounces:   c.Bounces,
+		Seconds:   c.Seconds,
+		Spread:    spread,
+	})
 }
 
 // Response is what a search found.
