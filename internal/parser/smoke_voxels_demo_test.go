@@ -252,7 +252,8 @@ func TestSmokeVoxelCalibration(t *testing.T) {
 	for _, tr := range tracks {
 		l := tr.log
 		fixed := l.brickIoU(l.fillOrder(p.budgetMax, voxelStepCost)[:p.budget])
-		order, budget, fitted := l.fitShape(p)
+		order := l.fillOrder(p.budgetMax, p.fall)
+		budget, fitted := l.fitBudget(order, p)
 		fixedSum += fixed
 		fittedSum += fitted
 
