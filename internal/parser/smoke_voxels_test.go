@@ -442,11 +442,34 @@ func TestReconstructSmokeVoxels(t *testing.T) {
 		"tick goes back": {buf, [][2]int{{mid, 5}, {len(buf), 4}}, det, nil},
 		"negative tick":  {buf, [][2]int{{len(buf), -1}}, det, nil},
 		"oversized log":  {make([]byte, voxelFrameDataSlots+1), nil, det, nil},
+		"tick too late":  {buf, [][2]int{{len(buf), maxReconstructTick + 1}}, det, nil},
 	} {
 		_, err := ReconstructSmokeVoxels(c.buf, c.samples, c.det, 64)
 		if err == nil || (c.want != nil && !errors.Is(err, c.want)) || (c.want == nil && errors.Is(err, ErrNoSmokeVoxels)) {
 			t.Errorf("%s: err %v, want %v", name, err, c.want)
 		}
+	}
+	if _, err := ReconstructSmokeVoxels(buf, [][2]int{{len(buf), 0}}, det, 1e300); err == nil || errors.Is(err, ErrNoSmokeVoxels) {
+		t.Errorf("an absurd tick rate: err %v, want a bad request", err)
+	}
+}
+
+// A request's log can put a source point anywhere a byte reaches; one past
+// the 32^3 grid must be skipped, not index past it.
+func TestReconstructSmokeVoxelsIgnoresSourcesOutsideTheGrid(t *testing.T) {
+	brick := voxelBrick{Index: 0, Mask: 0}
+	buf := voxelFrameBytes(0, []voxelSource{{X: 255, Y: 255, Z: 255}, {X: 1, Y: 1, Z: 1}}, []voxelBrick{brick})
+	det := r3.Vector{X: 1, Y: 2, Z: 3}
+	out, err := ReconstructSmokeVoxels(buf, [][2]int{{len(buf), 0}}, det, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.DimX == 0 {
+		t.Error("the in-grid source should still fill its brick")
+	}
+	only := voxelFrameBytes(0, []voxelSource{{X: 200, Y: 40, Z: 33}}, []voxelBrick{brick})
+	if _, err := ReconstructSmokeVoxels(only, [][2]int{{len(only), 0}}, det, 64); !errors.Is(err, ErrNoSmokeVoxels) {
+		t.Errorf("sources all outside the grid: err %v, want ErrNoSmokeVoxels", err)
 	}
 }
 

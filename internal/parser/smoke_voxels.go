@@ -423,7 +423,13 @@ func (l *voxelLog) timeShape(cells []int, stepTicks int) []int {
 		}
 	}
 	for _, s := range l.sources {
-		if i := voxelIndex(int(s.X), int(s.Y), int(s.Z)); in[i] {
+		// A source outside the grid fills nothing (as in fillOrder), and must
+		// not index past it: a log from a request can say anything.
+		x, y, z := int(s.X), int(s.Y), int(s.Z)
+		if x >= voxelGridDim || y >= voxelGridDim || z >= voxelGridDim {
+			continue
+		}
+		if i := voxelIndex(x, y, z); in[i] {
 			push(i, 0)
 		}
 	}
@@ -629,6 +635,13 @@ func (t *smokeVoxelTrack) export(endTick int, tickRate float64, p voxelFloodPara
 // source points, no detonation position, or no complete frame.
 var ErrNoSmokeVoxels = errors.New("voxel log holds no smoke to reconstruct")
 
+// maxReconstructTickRate and maxReconstructTick bound a request's timing:
+// well past any real server, well short of overflowing a tick.
+const (
+	maxReconstructTickRate = 1024
+	maxReconstructTick     = maxReconstructTickRate * 600
+)
+
 // ReconstructSmokeVoxels rebuilds a smoke from a voxel log read live off its
 // projectile instead of out of a demo. buf is the log as it finally stood;
 // samples are [length, tick after detonation] for each tick it grew, the reads
@@ -637,6 +650,11 @@ var ErrNoSmokeVoxels = errors.New("voxel log holds no smoke to reconstruct")
 func ReconstructSmokeVoxels(buf []byte, samples [][2]int, det r3.Vector, tickRate float64) (EventSmokeVoxels, error) {
 	if len(buf) > voxelFrameDataSlots {
 		return EventSmokeVoxels{}, fmt.Errorf("log is %d bytes; the networked array holds %d", len(buf), voxelFrameDataSlots)
+	}
+	// Bounded so the timing arithmetic cannot overflow: CS2 runs at 64, and a
+	// cloud finishes growing within seconds.
+	if tickRate > maxReconstructTickRate {
+		return EventSmokeVoxels{}, fmt.Errorf("tick rate %v is above %d", tickRate, maxReconstructTickRate)
 	}
 	l := newVoxelLog()
 	seen, end := 0, 0
@@ -647,6 +665,9 @@ func ReconstructSmokeVoxels(buf []byte, samples [][2]int, det r3.Vector, tickRat
 		}
 		if tick < end {
 			return EventSmokeVoxels{}, fmt.Errorf("sample %d: tick %d is before %d", i, tick, end)
+		}
+		if tick > maxReconstructTick {
+			return EventSmokeVoxels{}, fmt.Errorf("sample %d: tick %d is more than %d after detonation", i, tick, maxReconstructTick)
 		}
 		end = tick
 		// As in poll, only growth is read.
