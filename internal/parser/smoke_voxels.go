@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"container/heap"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -15,37 +14,28 @@ import (
 
 // CS2 networks each smoke's own simulation on CSmokeGrenadeProjectile.
 // m_VoxelFrameData is a byte array (m_nVoxelFrameDataSize of it in use) holding
-// an append-only log the server extends every few ticks while the cloud grows:
+// an append-only log, one frame for every step the server's simulation takes
+// (ten a second):
 //
 //	frame   = u16 frame number, u16 payload length, payload
-//	payload = u8 0, u8 flags,
-//	          flags&1: u8 n, n × 8-byte source point (x, y, z, v, 4 × 0)
+//	payload = u8 fading, u8 flags,
+//	          flags&1: u8 n, n × emitter (u8 x, y, z, level, f32 hold)
 //	          flags&2: u16 n, n × (u16 brick index, u64 solid mask)
-//	          u8 0
+//	          u8 n, n × 20-byte hole
 //
 // The grid is 32³ voxels of 20 units whose minimum corner sits 320 units below
 // m_vSmokeDetonationPos on every axis. It is split into 8³ bricks of 4³ voxels;
 // a brick index is a Morton code over the brick grid and each mask bit, also
-// Morton-ordered, marks one voxel of world geometry. The server sends a brick
-// once its own cloud gets near it, so the set of bricks — and the frame each
-// arrived in — traces where and when the real smoke spread.
+// Morton-ordered, marks one voxel of world geometry.
 //
-// The client turns that into the cloud by flooding out from the source points
-// through the free voxels until it holds a fixed volume — pushed into a
-// corridor, a smoke runs further, and off a ledge it pours down to the floor
-// below. This does the same in two passes:
+// None of that is the cloud. The emitters are where the server decided the
+// smoke comes out — around the detonation, and down to the floor below when it
+// goes off on a ledge — and a brick is sent the first time the simulation
+// looks into it. The client runs the same simulation from the same emitters
+// and geometry, and so does this (smokeSim), a step for every frame; the cloud
+// is where it ends up holding density.
 //
-//   - Shape: a flood from the sources through free voxels of the bricks the
-//     server sent, cheapest first, where a step down costs a tenth of a step
-//     sideways or up, so it pours to the floor before it spreads, stopped at a
-//     voxel budget. The budget is fitted per smoke: the server sends every
-//     brick its cloud reached or touched, so the right size is the one whose
-//     one-voxel shell covers those bricks and no others. The bricks are too
-//     coarse to say how far a cloud poured, so the fall is not fitted: on flat
-//     ground it changes nothing, and off a ledge the game's cloud pours.
-//   - Timing: when each voxel of that shape filled. It spreads one voxel per
-//     step from the sources, and never into a brick before the server sent it,
-//     so growth follows the server's own clock at brick resolution.
+// Holes, which a grenade or bullets punch in the cloud, are not replayed.
 const (
 	voxelGridDim  = 32
 	voxelBrickDim = 4
@@ -59,43 +49,25 @@ const (
 	voxelFrameDataSlots = 3072
 
 	// arrPerSecond is the unit of an exported arrival time: 1/40 s, so a
-	// byte covers 6.35 s — longer than any cloud takes to finish growing.
+	// byte covers 6.35 s; the little that fills later is clamped to that.
 	arrPerSecond = 40
 	arrMax       = 254
 	arrNever     = 255
+
+	// smokeVisible is the density a voxel must hold to be part of the cloud:
+	// the game's own line for a point being in smoke
+	// (inferno_smoke_volume_density, 0.05 of a full voxel).
+	smokeVisible = 0.05 * simFullDensity
+
+	// smokeSettleSteps is the most steps of a log that are replayed: ten
+	// seconds, by when a cloud has stopped growing.
+	smokeSettleSteps = 100
 )
-
-// Calibrated on test.dem's de_inferno smokes; see TestSmokeVoxelCalibration.
-var defaultVoxelFlood = voxelFloodParams{
-	budget:    800,
-	budgetMin: 600,
-	budgetMax: 1100,
-	stepSecs:  6.0 / 64,
-	fall:      10,
-}
-
-// voxelStepCost is what a step sideways or up costs in the shape flood; a
-// step down costs fall instead.
-const voxelStepCost = 100
-
-// voxelFloodParams shapes the reconstruction.
-//
-// budget is the cloud's volume in voxels when its bricks cannot tell sizes
-// apart; budgetMin and budgetMax bound the per-smoke fit. stepSecs is how long
-// the cloud takes to advance one voxel where the server's bricks do not hold
-// it back: half of a cloud's bricks arrive on the detonation frame, and without
-// a pace that half would appear at once. fall is the cost of a step down,
-// against voxelStepCost for any other step.
-type voxelFloodParams struct {
-	budget    int
-	budgetMin int
-	budgetMax int
-	stepSecs  float64
-	fall      int
-}
 
 type voxelSource struct {
 	X, Y, Z, V uint8
+	// Hold is how far the emitter is held back, 0 for one emitting in full.
+	Hold float32
 }
 
 type voxelBrick struct {
@@ -104,7 +76,9 @@ type voxelBrick struct {
 }
 
 type voxelFrame struct {
-	Number  int
+	Number int
+	// Fading is set once the smoke has stopped emitting, near its end.
+	Fading  bool
 	Sources []voxelSource
 	Bricks  []voxelBrick
 }
@@ -136,6 +110,7 @@ func decodeVoxelPayload(n int, p []byte) (voxelFrame, error) {
 	if len(p) < 2 {
 		return f, errVoxelFrame
 	}
+	f.Fading = p[0] != 0
 	flags := p[1]
 	at := 2
 	if flags&1 != 0 {
@@ -150,7 +125,7 @@ func decodeVoxelPayload(n int, p []byte) (voxelFrame, error) {
 		f.Sources = make([]voxelSource, count)
 		for i := range f.Sources {
 			r := p[at+i*8:]
-			f.Sources[i] = voxelSource{X: r[0], Y: r[1], Z: r[2], V: r[3]}
+			f.Sources[i] = voxelSource{X: r[0], Y: r[1], Z: r[2], V: r[3], Hold: math.Float32frombits(binary.LittleEndian.Uint32(r[4:]))}
 		}
 		at += count * 8
 	}
@@ -200,19 +175,28 @@ func voxelIndex(x, y, z int) int {
 	return (z*voxelGridDim+y)*voxelGridDim + x
 }
 
-func brickOf(x, y, z int) int {
-	bx, by, bz := x/voxelBrickDim, y/voxelBrickDim, z/voxelBrickDim
-	return (bz*voxelBrickRow+by)*voxelBrickRow + bx
+func voxelCoord(i int) (x, y, z int) {
+	return i % voxelGridDim, i / voxelGridDim % voxelGridDim, i / (voxelGridDim * voxelGridDim)
 }
 
-// voxelLog is everything one smoke networked, with the tick each brick arrived.
+// voxelStep is what one frame told the simulation.
+type voxelStep struct {
+	// tick is when the frame arrived, relative to detonation.
+	tick int
+	// emitters replaces the emitters when the frame carried any: the first
+	// frame's, and any the server moved since.
+	emitters []simEmitter
+	fading   bool
+}
+
+// voxelLog is everything one smoke networked. Its arrays are indexed by
+// Morton code, the way the log and the simulation index them.
 type voxelLog struct {
-	sources []voxelSource
-	// brickTick is the tick, relative to detonation, each brick arrived; -1
-	// for bricks the server never sent.
-	brickTick [voxelBricks]int
-	solid     [voxelCells]bool
-	frames    int
+	steps []voxelStep
+	solid [voxelCells]bool
+	// sent are the bricks the server sent, which are the ones its simulation
+	// looked into.
+	sent [voxelBricks]bool
 
 	// next is the offset just past the last frame read decoded.
 	next int
@@ -222,11 +206,7 @@ type voxelLog struct {
 }
 
 func newVoxelLog() *voxelLog {
-	l := &voxelLog{}
-	for i := range l.brickTick {
-		l.brickTick[i] = -1
-	}
-	return l
+	return &voxelLog{}
 }
 
 // read decodes the frames buf, the raw log so far, completed since the last
@@ -252,283 +232,109 @@ func (l *voxelLog) apply(f voxelFrame, tick int) {
 	if tick < 0 {
 		tick = 0
 	}
-	l.frames++
-	if len(f.Sources) > 0 && len(l.sources) == 0 {
-		l.sources = f.Sources
+	step := voxelStep{tick: tick, fading: f.Fading}
+	if len(f.Sources) > 0 {
+		step.emitters = make([]simEmitter, len(f.Sources))
+		for i, s := range f.Sources {
+			step.emitters[i] = simEmitter{x: int(s.X), y: int(s.Y), z: int(s.Z), hold: s.Hold}
+		}
 	}
+	l.steps = append(l.steps, step)
 	for _, b := range f.Bricks {
-		bx, by, bz := brickCoord(b.Index)
-		idx := brickOf(bx*voxelBrickDim, by*voxelBrickDim, bz*voxelBrickDim)
-		if l.brickTick[idx] < 0 {
-			l.brickTick[idx] = tick
-		}
+		brick := int(b.Index) & (voxelBricks - 1)
+		l.sent[brick] = true
 		for bit := 0; bit < 64; bit++ {
-			if b.Mask>>bit&1 == 0 {
-				continue
+			if b.Mask>>bit&1 != 0 {
+				l.solid[brick<<6|bit] = true
 			}
-			lx, ly, lz := maskVoxel(bit)
-			l.solid[voxelIndex(bx*voxelBrickDim+lx, by*voxelBrickDim+ly, bz*voxelBrickDim+lz)] = true
 		}
 	}
 }
 
-func voxelCoord(i int) (x, y, z int) {
-	return i % voxelGridDim, i / voxelGridDim % voxelGridDim, i / (voxelGridDim * voxelGridDim)
+// simulation is the game's simulation set up from the log. The game only
+// reads geometry out of bricks it has sent, so what an unsent one holds never
+// matters to a faithful replay; it counts as wall so that nothing can spread
+// where nothing says it can.
+func (l *voxelLog) simulation(det r3.Vector) *smokeSim {
+	sim := newSmokeSim([3]float32{float32(det.X), float32(det.Y), float32(det.Z)})
+	for m := range sim.solid {
+		sim.solid[m] = l.solid[m] || !l.sent[m>>6]
+	}
+	return sim
 }
 
-// open reports whether the cloud may occupy a voxel: inside the grid, in a
-// brick the server sent, and not world geometry.
-func (l *voxelLog) open(x, y, z int) bool {
-	if x < 0 || y < 0 || z < 0 || x >= voxelGridDim || y >= voxelGridDim || z >= voxelGridDim {
+// advance takes the simulation's step n, fed what frame n said. ok is false
+// when the smoke had started to fade, which ends the cloud's growth.
+func (l *voxelLog) advance(sim *smokeSim, n int) (ok bool) {
+	step := l.steps[n]
+	if step.fading {
 		return false
 	}
-	return l.brickTick[brickOf(x, y, z)] >= 0 && !l.solid[voxelIndex(x, y, z)]
+	if step.emitters != nil {
+		sim.emitters = append(sim.emitters[:0], step.emitters...)
+	}
+	sim.step()
+	return true
 }
 
-// fillOrder is up to limit voxels in the order a flood from the sources
-// reaches them, cheapest first, where a step down costs fall and any other
-// step voxelStepCost. Any prefix of it is the cloud at that volume. A fall of
-// voxelStepCost is a breadth-first flood.
-func (l *voxelLog) fillOrder(limit, fall int) []int {
-	best := make([]int, voxelCells)
-	for i := range best {
-		best[i] = math.MaxInt
-	}
-	done := make([]bool, voxelCells)
-	order := make([]int, 0, limit)
-	q := &voxelQueue{}
-	push := func(cell, cost int) {
-		if cost < best[cell] {
-			best[cell] = cost
-			heap.Push(q, voxelEntry{tick: cost, cell: cell, seq: q.seq})
-			q.seq++
+// stepTicks is when each replayed step happened, relative to detonation. A
+// frame is stamped with the tick it was read on, which is late whenever
+// several are read at once; the game never takes two steps closer together
+// than its pace, so each happened at least a pace before the next.
+func (l *voxelLog) stepTicks(tickRate float64) []int {
+	pace := int(math.Ceil(simStepSecs*tickRate - 1e-9))
+	ticks := make([]int, min(len(l.steps), smokeSettleSteps))
+	for n := len(ticks) - 1; n >= 0; n-- {
+		ticks[n] = l.steps[n].tick
+		if n+1 < len(ticks) {
+			ticks[n] = max(0, min(ticks[n], ticks[n+1]-pace))
 		}
 	}
-	for _, s := range l.sources {
-		x, y, z := int(s.X), int(s.Y), int(s.Z)
-		if l.open(x, y, z) {
-			push(voxelIndex(x, y, z), 0)
-		}
-	}
-	for q.Len() > 0 && len(order) < limit {
-		e := heap.Pop(q).(voxelEntry)
-		if done[e.cell] {
-			continue
-		}
-		done[e.cell] = true
-		order = append(order, e.cell)
-		x, y, z := voxelCoord(e.cell)
-		for _, d := range smokeNeighbors {
-			nx, ny, nz := x+d[0], y+d[1], z+d[2]
-			if !l.open(nx, ny, nz) {
-				continue
-			}
-			step := voxelStepCost
-			if d[2] < 0 {
-				step = fall
-			}
-			if n := voxelIndex(nx, ny, nz); !done[n] {
-				push(n, e.tick+step)
-			}
-		}
-	}
-	return order
+	return ticks
 }
 
-// brickCover scores a growing cloud against the bricks the server sent. The
-// server sends every brick its cloud occupied or bordered, so the comparison is
-// with the bricks ours occupies or borders: intersection over union.
-type brickCover struct {
-	log       *voxelLog
-	touched   [voxelBricks]bool
-	sent      int
-	predicted int
-	hit       int
-}
-
-func newBrickCover(l *voxelLog) *brickCover {
-	c := &brickCover{log: l}
-	for _, t := range l.brickTick {
-		if t >= 0 {
-			c.sent++
-		}
+// cloud replays the simulation, a step for each frame the log holds, and
+// returns, by voxel, the tick after detonation the smoke reached it, or -1
+// for a voxel outside the cloud as it finally stood.
+func (l *voxelLog) cloud(det r3.Vector, tickRate float64) []int {
+	sim := l.simulation(det)
+	reached := make([]int, voxelCells)
+	for m := range reached {
+		reached[m] = -1
 	}
-	return c
-}
-
-func (c *brickCover) add(cell int) {
-	x, y, z := voxelCoord(cell)
-	c.touch(x, y, z)
-	for _, d := range smokeNeighbors {
-		c.touch(x+d[0], y+d[1], z+d[2])
-	}
-}
-
-func (c *brickCover) touch(x, y, z int) {
-	if x < 0 || y < 0 || z < 0 || x >= voxelGridDim || y >= voxelGridDim || z >= voxelGridDim {
-		return
-	}
-	b := brickOf(x, y, z)
-	if c.touched[b] {
-		return
-	}
-	c.touched[b] = true
-	c.predicted++
-	if c.log.brickTick[b] >= 0 {
-		c.hit++
-	}
-}
-
-func (c *brickCover) iou() float64 {
-	union := c.predicted + c.sent - c.hit
-	if union == 0 {
-		return 0
-	}
-	return float64(c.hit) / float64(union)
-}
-
-func (l *voxelLog) brickIoU(cells []int) float64 {
-	c := newBrickCover(l)
-	for _, cell := range cells {
-		c.add(cell)
-	}
-	return c.iou()
-}
-
-// fitBudget picks how much of order is the cloud: the volume within the bounds
-// that best matches the bricks the server sent, nearest the default on a tie.
-func (l *voxelLog) fitBudget(order []int, p voxelFloodParams) (budget int, iou float64) {
-	if len(order) <= p.budgetMin {
-		return len(order), l.brickIoU(order)
-	}
-	c := newBrickCover(l)
-	best, bestDist := -1.0, 0
-	for i, cell := range order {
-		c.add(cell)
-		n := i + 1
-		if n < p.budgetMin {
-			continue
-		}
-		if n > p.budgetMax {
+	for n, tick := range l.stepTicks(tickRate) {
+		if !l.advance(sim, n) {
 			break
 		}
-		score := c.iou()
-		dist := n - p.budget
-		if dist < 0 {
-			dist = -dist
+		for m := range reached {
+			if reached[m] < 0 && sim.cell[sim.cur][m].density > smokeVisible {
+				reached[m] = tick
+			}
 		}
-		if score > best+1e-9 || (score > best-1e-9 && dist < bestDist) {
-			best, bestDist, budget = score, dist, n
-		}
-	}
-	return budget, best
-}
-
-// timeShape is when each voxel of the cloud filled, in ticks after
-// detonation, or -1 outside it: a Dijkstra from the sources over the cloud
-// where a step costs stepTicks and no voxel fills before its brick arrived.
-func (l *voxelLog) timeShape(cells []int, stepTicks int) []int {
-	in := make([]bool, voxelCells)
-	for _, c := range cells {
-		in[c] = true
 	}
 	arrival := make([]int, voxelCells)
-	best := make([]int, voxelCells)
-	for i := range arrival {
-		arrival[i] = -1
-		best[i] = math.MaxInt
-	}
-	q := &voxelQueue{}
-	push := func(cell, tick int) {
-		if b := l.brickTick[brickOf(voxelCoord(cell))]; b > tick {
-			tick = b
+	for m, tick := range reached {
+		if sim.cell[sim.cur][m].density <= smokeVisible {
+			tick = -1
 		}
-		if tick < best[cell] {
-			best[cell] = tick
-			heap.Push(q, voxelEntry{tick: tick, cell: cell, seq: q.seq})
-			q.seq++
-		}
-	}
-	for _, s := range l.sources {
-		// A source outside the grid fills nothing (as in fillOrder), and must
-		// not index past it: a log from a request can say anything.
-		x, y, z := int(s.X), int(s.Y), int(s.Z)
-		if x >= voxelGridDim || y >= voxelGridDim || z >= voxelGridDim {
-			continue
-		}
-		if i := voxelIndex(x, y, z); in[i] {
-			push(i, 0)
-		}
-	}
-	for q.Len() > 0 {
-		e := heap.Pop(q).(voxelEntry)
-		if arrival[e.cell] >= 0 {
-			continue
-		}
-		arrival[e.cell] = e.tick
-		x, y, z := voxelCoord(e.cell)
-		for _, d := range smokeNeighbors {
-			nx, ny, nz := x+d[0], y+d[1], z+d[2]
-			if nx < 0 || ny < 0 || nz < 0 || nx >= voxelGridDim || ny >= voxelGridDim || nz >= voxelGridDim {
-				continue
-			}
-			if n := voxelIndex(nx, ny, nz); in[n] && arrival[n] < 0 {
-				push(n, e.tick+stepTicks)
-			}
-		}
+		arrival[voxelOfMorton[m]] = tick
 	}
 	return arrival
 }
 
-// flood reconstructs the cloud: ticks after detonation each voxel filled, -1
-// for voxels it never reached.
-func (l *voxelLog) flood(p voxelFloodParams, tickRate float64) []int {
-	order := l.fillOrder(p.budgetMax, p.fall)
-	budget, _ := l.fitBudget(order, p)
-	return l.timeShape(order[:budget], int(math.Round(p.stepSecs*tickRate)))
-}
-
-// export reconstructs and packs the cloud around det. ok is false when the log
-// holds nothing to reconstruct from.
-func (l *voxelLog) export(det r3.Vector, tickRate float64, p voxelFloodParams) (EventSmokeVoxels, bool) {
-	if len(l.sources) == 0 || (det.X == 0 && det.Y == 0 && det.Z == 0) {
+// export simulates and packs the cloud around det. ok is false when the log
+// holds nothing to simulate from.
+func (l *voxelLog) export(det r3.Vector, tickRate float64) (EventSmokeVoxels, bool) {
+	if len(l.steps) == 0 || len(l.steps[0].emitters) == 0 || (det.X == 0 && det.Y == 0 && det.Z == 0) {
 		return EventSmokeVoxels{}, false
 	}
 	if tickRate <= 0 {
 		tickRate = 64
 	}
-	return exportVoxels(l.flood(p, tickRate), det, tickRate)
+	return exportVoxels(l.cloud(det, tickRate), det, tickRate)
 }
 
-type voxelEntry struct {
-	tick int
-	cell int
-	// seq breaks ties first-in first-out, so the queue pops deterministically.
-	seq int
-}
-
-type voxelQueue struct {
-	items []voxelEntry
-	seq   int
-}
-
-func (q *voxelQueue) Len() int { return len(q.items) }
-func (q *voxelQueue) Less(i, j int) bool {
-	if q.items[i].tick != q.items[j].tick {
-		return q.items[i].tick < q.items[j].tick
-	}
-	return q.items[i].seq < q.items[j].seq
-}
-func (q *voxelQueue) Swap(i, j int) { q.items[i], q.items[j] = q.items[j], q.items[i] }
-func (q *voxelQueue) Push(x any)    { q.items = append(q.items, x.(voxelEntry)) }
-func (q *voxelQueue) Pop() any {
-	n := len(q.items) - 1
-	e := q.items[n]
-	q.items = q.items[:n]
-	return e
-}
-
-// exportVoxels trims the flood to its bounding box and packs it for the blob.
+// exportVoxels trims the cloud to its bounding box and packs it for the blob.
 // ok is false when nothing filled.
 func exportVoxels(arrival []int, det r3.Vector, tickRate float64) (out EventSmokeVoxels, ok bool) {
 	lo := [3]int{voxelGridDim, voxelGridDim, voxelGridDim}
@@ -644,10 +450,10 @@ func (t *smokeVoxelTrack) poll(tick int) {
 	t.log.read(t.buf, tick-t.startTick)
 }
 
-// export reconstructs and packs the cloud. ok is false when the smoke
-// networked nothing to reconstruct from.
-func (t *smokeVoxelTrack) export(endTick int, tickRate float64, p voxelFloodParams) (EventSmokeVoxels, bool) {
-	out, ok := t.log.export(t.det, tickRate, p)
+// export simulates and packs the cloud. ok is false when the smoke networked
+// nothing to simulate from.
+func (t *smokeVoxelTrack) export(endTick int, tickRate float64) (EventSmokeVoxels, bool) {
+	out, ok := t.log.export(t.det, tickRate)
 	if !ok {
 		return out, false
 	}
@@ -658,8 +464,8 @@ func (t *smokeVoxelTrack) export(endTick int, tickRate float64, p voxelFloodPara
 	return out, true
 }
 
-// ErrNoSmokeVoxels means a voxel log held nothing to rebuild a cloud from: no
-// source points, no detonation position, or no complete frame.
+// ErrNoSmokeVoxels means a voxel log held nothing to simulate a cloud from: no
+// emitters, no detonation position, or no complete frame.
 var ErrNoSmokeVoxels = errors.New("voxel log holds no smoke to reconstruct")
 
 // maxReconstructTickRate and maxReconstructTick bound a request's timing:
@@ -704,7 +510,7 @@ func ReconstructSmokeVoxels(buf []byte, samples [][2]int, det r3.Vector, tickRat
 		seen = size
 		l.read(buf[:size], tick)
 	}
-	out, ok := l.export(det, tickRate, defaultVoxelFlood)
+	out, ok := l.export(det, tickRate)
 	if !ok {
 		return out, ErrNoSmokeVoxels
 	}
@@ -747,7 +553,7 @@ func (s *state) closeSmokeVoxels(entID, endTick int) {
 		return
 	}
 	delete(s.voxelTracks, entID)
-	out, ok := t.export(endTick, s.tickRate, defaultVoxelFlood)
+	out, ok := t.export(endTick, s.tickRate)
 	if !ok {
 		s.voxelSkipped++
 		return
