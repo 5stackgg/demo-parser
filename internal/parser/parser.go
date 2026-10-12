@@ -46,13 +46,11 @@ type state struct {
 	frames map[string]playerFrame
 
 	// Per-attacker last shot: used to flag spray shots (250ms window)
-	// and inherit the spray flag onto damages.
+	// and to match damage to the shot behind it.
 	lastShot map[string]shotMark
-	// Indices into res.ShotsFired that have not yet been matched to a damage
-	// event, oldest first, per attacker. A burst lands several rounds inside one
-	// spray window, so pairing damage against only the most recent shot leaves
-	// the rest of the burst looking like it missed.
-	pendingShots map[string][]int
+	// Bullet damage from the current tick, waiting for its shot. Within a tick
+	// the engine reports PlayerHurt before WeaponFire.
+	pendingHits []pendingHit
 
 	victimHealth map[string]int
 
@@ -72,6 +70,10 @@ type state struct {
 	// Consulted by losAt so every sightline-gated stat accounts for smoke.
 	smokes     []smokeCloud
 	smokeByEnt map[int]int
+	// Voxel logs being read off live smoke projectiles, by entity id.
+	voxelTracks   map[int]*smokeVoxelTrack
+	voxelSkipped  int
+	voxelBoxCells int
 	// Explosions currently holding a hole open in the smoke.
 	blasts []smokeBlast
 
@@ -189,12 +191,12 @@ func Parse(r io.Reader) (*Result, error) {
 		visStart:     map[string]map[string]visEntry{},
 		frames:       map[string]playerFrame{},
 		lastShot:     map[string]shotMark{},
-		pendingShots: map[string][]int{},
 		victimHealth: map[string]int{},
 		lastMoveTick: map[string]int{},
 		fovEntry:     map[string]map[string]visEntry{},
 		fovLosProbe:  map[[2]string]int{},
 		smokeByEnt:   map[int]int{},
+		voxelTracks:  map[int]*smokeVoxelTrack{},
 		infernos:     map[int]*infernoTrack{},
 		doorSeen:     map[int]bool{},
 		eyeHistory:   map[string][]eyeSample{},
@@ -338,6 +340,15 @@ func (s *state) finalize() {
 			"skipped(no_bounds=%d degenerate=%d no_origin=%d)\n",
 		len(s.doorSeen), s.doorsTracked, s.doorsMoved, s.doorBlocks,
 		s.doorsNoBounds, s.doorsDegenerate, s.doorsNoOrigin,
+	)
+
+	s.resolveHits()
+	s.closeAllSmokeVoxels(s.maxTick)
+	s.sortSmokeVoxels()
+	fmt.Fprintf(
+		os.Stderr,
+		"[smoke-voxels] clouds=%d skipped=%d cells=%d\n",
+		len(s.res.SmokeVoxels), s.voxelSkipped, s.voxelBoxCells,
 	)
 
 	s.flushInfernos()

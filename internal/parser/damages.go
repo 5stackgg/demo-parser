@@ -37,29 +37,8 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 	}
 	attackerID := steamIDStr(e.Attacker)
 	tick := s.parser.GameState().IngameTick()
-	// Attribute this damage to the attacker's most-recent shot if it
-	// fired within 250ms; inherit the spray flag.
-	fromSpray := false
-	headshot := int(e.HitGroup) == 1
 	if rate := s.parser.TickRate(); rate > 0 {
 		if prev, ok := s.lastShot[attackerID]; ok && float64(tick-prev.tick)/rate < sprayWindowSecs {
-			if prev.isSpray && prev.enemySpotted {
-				fromSpray = true
-			}
-			// Backfill the firing shot's outcome (for the 3D tracer color) and
-			// end-point onto whichever round of the burst this damage belongs to.
-			if idx, ok := s.claimShotForDamage(attackerID, tick); ok {
-				sh := &s.res.ShotsFired[idx]
-				if headshot {
-					sh.Result = "headshot"
-				} else {
-					sh.Result = "hit"
-				}
-				ix, iy, iz := s.impactPoint(e.Player, sh, int(e.HitGroup))
-				sh.ImpactX = f32ptr(ix)
-				sh.ImpactY = f32ptr(iy)
-				sh.ImpactZ = f32ptr(iz)
-			}
 			// Mark the engagement's first shot as a hit if this damage
 			// landed right after it.
 			if m := s.engagements[attackerID]; m != nil {
@@ -83,7 +62,6 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 		Hitgroup:        int(e.HitGroup),
 		Health:          e.Health,
 		HitOnSpotted:    e.Player.IsSpottedBy(e.Attacker),
-		FromSpray:       fromSpray,
 	}
 	if e.Weapon != nil {
 		d.Weapon = weaponCanonical(e.Weapon)
@@ -125,6 +103,19 @@ func (s *state) onPlayerHurt(e events.PlayerHurt) {
 		}
 	}
 	s.res.Damages = append(s.res.Damages, d)
+	// The shot that did this has usually not been recorded yet — within a
+	// tick the engine reports the damage, then the kill, then the shot — so
+	// the damage waits for the end of the tick to find it.
+	if isBulletWeapon(e.Weapon) {
+		s.pendingHits = append(s.pendingHits, pendingHit{
+			damage:   len(s.res.Damages) - 1,
+			attacker: attackerID,
+			tick:     tick,
+			hitGroup: int(e.HitGroup),
+			victim:   e.Player.Position(),
+			ducking:  e.Player.IsDucking(),
+		})
+	}
 }
 
 // onPlayerSpottersChanged diffs the spotter set for e.Spotted against
@@ -201,35 +192,92 @@ func (s *state) onPlayerSpottersChanged(e events.PlayerSpottersChanged) {
 	s.visStart[spottedID] = next
 }
 
-// claimShotForDamage matches one damage event to the oldest unresolved shot the
-// attacker fired inside the spray window, and drops anything older than that
-// window on the way past. Matching against only the latest shot left every
-// round of a burst but one with no recorded impact, so the replay flew them on
-// to the wall behind the victim as though they had missed.
-func (s *state) claimShotForDamage(attackerID string, tick int) (int, bool) {
-	queue := s.pendingShots[attackerID]
-	if len(queue) == 0 {
+// pendingHit is a bullet's damage waiting for the end of its tick to be
+// matched to the shot that fired it.
+type pendingHit struct {
+	damage   int
+	attacker string
+	tick     int
+	hitGroup int
+	victim   r3.Vector
+	ducking  bool
+}
+
+// isBulletWeapon reports whether damage from this weapon came from a recorded
+// shot: the classes onWeaponFire keeps. A grenade, fire or a knife never
+// claims a bullet.
+func isBulletWeapon(w *common.Equipment) bool {
+	if w == nil {
+		return false
+	}
+	switch w.Class() {
+	case common.EqClassPistols, common.EqClassSMG, common.EqClassHeavy, common.EqClassRifle:
+		return true
+	}
+	return false
+}
+
+// resolveHits matches the tick's bullet damage to shots, once every shot of
+// the tick is in. Called at the end of each tick, and before anything that
+// forgets shots.
+func (s *state) resolveHits() {
+	for _, h := range s.pendingHits {
+		s.resolveHit(h)
+	}
+	s.pendingHits = s.pendingHits[:0]
+}
+
+// resolveHit backfills the firing shot's outcome (for the 3D tracer colour) and
+// end point, and the damage's spray flag from that shot.
+func (s *state) resolveHit(h pendingHit) {
+	idx, ok := s.shotForHit(h.attacker, h.tick)
+	if !ok {
+		return
+	}
+	sh := &s.res.ShotsFired[idx]
+	if sh.Result == "" {
+		if h.hitGroup == 1 {
+			sh.Result = "headshot"
+		} else {
+			sh.Result = "hit"
+		}
+		ix, iy, iz := impactPoint(h.victim, h.ducking, sh, h.hitGroup)
+		sh.ImpactX = f32ptr(ix)
+		sh.ImpactY = f32ptr(iy)
+		sh.ImpactZ = f32ptr(iz)
+	}
+	if h.damage >= 0 && h.damage < len(s.res.Damages) {
+		s.res.Damages[h.damage].FromSpray = sh.IsSpray && sh.EnemySpotted
+	}
+}
+
+// shotForHit is the shot behind a bullet's damage: the attacker's unclaimed
+// shot on the damage's own tick, else their latest shot inside the spray
+// window. That latest shot may already be claimed — a second player hit by the
+// same bullet through a wall — and then it is still the answer, so the second
+// victim does not turn an earlier miss into a hit.
+func (s *state) shotForHit(attacker string, tick int) (int, bool) {
+	found := -1
+	for i := len(s.res.ShotsFired) - 1; i >= 0; i-- {
+		sh := &s.res.ShotsFired[i]
+		if sh.Tick < tick {
+			break
+		}
+		if sh.Tick == tick && sh.AttackerSteamID == attacker && sh.Result == "" {
+			found = i
+		}
+	}
+	if found >= 0 {
+		return found, true
+	}
+	last, ok := s.lastShot[attacker]
+	if !ok || last.idx < 0 || last.idx >= len(s.res.ShotsFired) || last.tick > tick {
 		return 0, false
 	}
-	rate := s.parser.TickRate()
-	kept := queue[:0]
-	claimed, found := 0, false
-	for _, idx := range queue {
-		if idx < 0 || idx >= len(s.res.ShotsFired) {
-			continue
-		}
-		sh := &s.res.ShotsFired[idx]
-		if rate > 0 && float64(tick-sh.Tick)/rate > sprayWindowSecs {
-			continue
-		}
-		if !found && sh.Result == "" {
-			claimed, found = idx, true
-			continue
-		}
-		kept = append(kept, idx)
+	if s.tickRate > 0 && float64(tick-last.tick)/s.tickRate >= sprayWindowSecs {
+		return 0, false
 	}
-	s.pendingShots[attackerID] = kept
-	return claimed, found
+	return last.idx, true
 }
 
 // Heights above the victim's origin (their feet) that each hit group sits at,
@@ -252,10 +300,9 @@ func hitGroupHeight(hitGroup int) float64 {
 // the hit group, pulled back toward the shooter by roughly half a player's
 // width so the tracer stops on the near surface instead of running through to
 // the far side, which read as the shot sailing past them.
-func (s *state) impactPoint(victim *common.Player, sh *EventShotFired, hitGroup int) (float64, float64, float64) {
-	pos := victim.Position()
+func impactPoint(pos r3.Vector, ducking bool, sh *EventShotFired, hitGroup int) (float64, float64, float64) {
 	height := hitGroupHeight(hitGroup)
-	if victim.IsDucking() {
+	if ducking {
 		height *= 0.72
 	}
 	x, y, z := pos.X, pos.Y, pos.Z+height

@@ -195,7 +195,7 @@ func TestBlobCarriesCrouchStateAndSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !strings.Contains(string(res), `"schema_version":2`) {
+	if !strings.Contains(string(res), `"schema_version":3`) {
 		t.Fatalf("schema version is missing from the blob: %s", res)
 	}
 	// Emitted even at zero, so a consumer can tell an old blob from a field it

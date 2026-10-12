@@ -175,6 +175,32 @@ type EventSmokeVolume struct {
 	Density   string  `json:"den,omitempty"`
 }
 
+// EventSmokeVoxels is one smoke as the game simulated it, rebuilt from the
+// voxel log the server networks on the projectile rather than from our own
+// mesh. It is drawing data only; sightlines still use EventSmokeVolume.
+//
+// Arrival is base64, one byte per cell over DimX*DimY*DimZ cells, x varying
+// fastest, then y, then z: cell (i,j,k) is at index (k*DimY + j)*DimX + i and
+// has its minimum corner at Origin + (i,j,k)*VoxelSize. A byte is the time the
+// cell filled after detonation in 1/40 s (0..254, capped at 254), or 255 for a
+// cell the cloud never reached. The box is trimmed to the filled cells.
+type EventSmokeVoxels struct {
+	GrenadeID int `json:"gid"`
+	Round     int `json:"round"`
+	StartTick int `json:"start_tick"`
+	// EndTick is the engine's SmokeExpired, or the tick the projectile was
+	// removed when that never fired.
+	EndTick   int     `json:"end_tick"`
+	OriginX   float32 `json:"ox"`
+	OriginY   float32 `json:"oy"`
+	OriginZ   float32 `json:"oz"`
+	VoxelSize float32 `json:"vs"`
+	DimX      int     `json:"dx"`
+	DimY      int     `json:"dy"`
+	DimZ      int     `json:"dz"`
+	Arrival   string  `json:"arr"`
+}
+
 // EventInfernoFire is one flame within an inferno: where it burned and the tick
 // range over which it was alight. Positions come straight off the demo — the
 // engine networks each flame individually — so this is the exact ground a
@@ -295,8 +321,8 @@ type EventDamage struct {
 	Hitgroup        int    `json:"hitgroup,omitempty"`
 	Health          int    `json:"health,omitempty"`
 	HitOnSpotted    bool   `json:"hit_on_spotted,omitempty"`
-	// FromSpray: the attacker's most-recent shot was a spray shot and
-	// fired close enough to this damage to plausibly have produced it.
+	// FromSpray: the shot behind this damage was a spray shot — it followed
+	// the attacker's previous shot within 250ms — fired with an enemy in sight.
 	FromSpray         bool     `json:"from_spray,omitempty"`
 	SpotToDamageS     *float64 `json:"spot_to_damage,omitempty"`
 	CrosshairDeltaDeg *float32 `json:"crosshair_delta_deg,omitempty"`
@@ -377,7 +403,8 @@ type PlayerInfo struct {
 //	2 — EventPosition.ducked, and a full-rate burst of positions in a ±10 tick
 //	    window around every grenade throw (the sample interval is no longer a
 //	    constant ~4Hz; rows remain sorted by tick).
-const SchemaVersion = 2
+//	3 — smoke_voxels: each smoke rebuilt from the game's own voxel log.
+const SchemaVersion = 3
 
 type Result struct {
 	// SchemaVersion is always emitted, including at its zero value, so a
@@ -417,6 +444,7 @@ type Result struct {
 	GrenadeTrajectories []GrenadeTrajectory    `json:"grenade_trajectories,omitempty"`
 	AimEngagements      []EventAimEngagement   `json:"aim_engagements,omitempty"`
 	SmokeVolumes        []EventSmokeVolume     `json:"smoke_volumes,omitempty"`
+	SmokeVoxels         []EventSmokeVoxels     `json:"smoke_voxels,omitempty"`
 	Infernos            []EventInferno         `json:"infernos,omitempty"`
 }
 
@@ -484,13 +512,11 @@ type visEntry struct {
 	targetView r3.Vector
 }
 
-// shotMark records the attacker's last shot tick + whether that shot
-// was a spray shot. PlayerHurt attributes a damage to the most-recent
-// shot to inherit the spray flag.
+// shotMark records the attacker's last shot. The next shot reads it to tell a
+// spray from a tap, and a bullet's damage with no shot on its own tick falls
+// back to it.
 type shotMark struct {
-	tick         int
-	isSpray      bool
-	enemySpotted bool
+	tick int
 	// idx is the position of this shot in Result.ShotsFired, so a later
 	// matching PlayerHurt can backfill the shot's hit/headshot result.
 	idx int
