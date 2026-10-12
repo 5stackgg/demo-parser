@@ -12,6 +12,7 @@ Please visit [5Stack](https://docs.5stack.gg) for more documentation.
 | --- | --- | --- |
 | `POST /parse` | `{"demo_url": "..."}` | parsed `Result` JSON |
 | `POST /parse-file` | multipart, `demo` part | parsed `Result` JSON |
+| `POST /smoke-voxels` | `{"log","samples","detonation","tick_rate"}` | a smoke rebuilt from its live voxel log |
 | `POST /smoke-volume` | `{"map","x","y","z"}` | the bloom at a point |
 | `POST /sightlines` | map + smoke(s) + eye-position pairs | what the smoke blocks |
 | `POST /oneway` | map + smoke(s) + player-position pairs | asymmetric visibility |
@@ -54,6 +55,31 @@ otherwise) and tests both standing and crouched eye heights in both directions,
 treating each player as a body rather than a point. It reports `one_way`,
 `favors`, `cause`, `confidence`, `contested`, the `best` stance pairing and all
 four pairings, along with `caveats` describing what the model does not know.
+
+### `POST /smoke-voxels` — a smoke from its live voxel log
+
+CS2 networks each smoke's simulation on the projectile as an append-only log
+(`m_VoxelFrameData`, `m_nVoxelFrameDataSize` bytes in use). A server plugin
+reads it every tick and sends it here, and it is rebuilt exactly as a demo's
+`smoke_voxels` row is:
+
+```jsonc
+POST /smoke-voxels
+{
+  "log": "<base64 of the log's bytes>",        // at most 3072 bytes
+  "samples": [[662, 0], [688, 3], [1253, 61]], // [length, ticks after detonation] each tick it grew
+  "detonation": {"x": 1.0, "y": 2.0, "z": 3.0},
+  "tick_rate": 64                               // optional, defaults to 64
+}
+```
+
+Each frame is stamped with the first sample that completed it, so the samples
+are what times the cloud's growth; the log alone gives only its shape. The
+answer is one `smoke_voxels` row (`ox/oy/oz`, `vs`, `dx/dy/dz`, `arr`) with
+`gid`, `round` and `start_tick` 0 and `end_tick` the last sample's tick. A log
+with no source points, or a zero detonation, is `422`; a body that does not
+decode, or samples that run past the log or back in time, is `400`. Errors are
+`{"error": "..."}`.
 
 ### `POST /drift` — map-patch drift detection
 

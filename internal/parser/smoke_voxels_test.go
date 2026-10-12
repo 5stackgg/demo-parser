@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -386,6 +387,66 @@ func TestExportVoxelsPacksXFastest(t *testing.T) {
 	}
 	if at(1, 0, 0) != arrNever || at(2, 1, 1) != arrNever {
 		t.Fatal("cells the cloud never reached should be 255")
+	}
+}
+
+func TestReconstructSmokeVoxels(t *testing.T) {
+	buf := readVoxelDump(t, "smoke_voxels_inferno_4019.bin")
+	det := r3.Vector{X: 100, Y: 200, Z: 30}
+	// A frame boundary past frame 0, which holds the sources.
+	_, mid, _ := decodeVoxelFrames(buf[:len(buf)*3/4])
+
+	// Bytes past the last sample were never seen, and a sample that does not
+	// grow the log reads nothing, as in poll.
+	partial, err := ReconstructSmokeVoxels(buf, [][2]int{{mid, 0}, {mid, 9}}, det, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.EndTick != 9 {
+		t.Errorf("end tick %d, want the last sample's 9", partial.EndTick)
+	}
+	whole, err := ReconstructSmokeVoxels(buf, [][2]int{{mid, 0}, {len(buf), 9}}, det, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Arrival == whole.Arrival {
+		t.Error("reading the rest of the log should change the cloud")
+	}
+	// A missing tick rate is 64, as in the demo path.
+	if def, _ := ReconstructSmokeVoxels(buf, [][2]int{{mid, 0}, {len(buf), 9}}, det, 0); def != whole {
+		t.Error("tick rate 0 should mean 64")
+	}
+
+	// A frame that fails to decode stops the read: what came before it stays,
+	// and nothing after it is read.
+	broken := append(append([]byte{}, buf[:mid]...), 0, 0, 2, 0, 0, 2)
+	broken = append(broken, buf[mid:]...)
+	got, err := ReconstructSmokeVoxels(broken, [][2]int{{len(broken), 0}}, det, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := ReconstructSmokeVoxels(buf[:mid], [][2]int{{mid, 0}}, det, 64); got != want {
+		t.Error("a log that breaks part way should keep exactly the frames before the break")
+	}
+
+	for name, c := range map[string]struct {
+		buf     []byte
+		samples [][2]int
+		det     r3.Vector
+		want    error
+	}{
+		"empty log":      {nil, [][2]int{{0, 0}}, det, ErrNoSmokeVoxels},
+		"no samples":     {buf, nil, det, ErrNoSmokeVoxels},
+		"no detonation":  {buf, [][2]int{{len(buf), 0}}, r3.Vector{}, ErrNoSmokeVoxels},
+		"past the log":   {buf, [][2]int{{len(buf) + 1, 0}}, det, nil},
+		"tick goes back": {buf, [][2]int{{mid, 5}, {len(buf), 4}}, det, nil},
+		"negative tick":  {buf, [][2]int{{len(buf), -1}}, det, nil},
+		"oversized log":  {make([]byte, voxelFrameDataSlots+1), nil, det, nil},
+	} {
+		_, err := ReconstructSmokeVoxels(c.buf, c.samples, c.det, 64)
+		if err == nil || (c.want != nil && !errors.Is(err, c.want)) || (c.want == nil && errors.Is(err, ErrNoSmokeVoxels)) {
+			t.Errorf("%s: err %v, want %v", name, err, c.want)
+		}
 	}
 }
 

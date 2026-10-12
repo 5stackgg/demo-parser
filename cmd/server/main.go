@@ -9,6 +9,8 @@
 //	                                            server fetches the demo.
 //	                      POST /parse-file    — multipart upload with a
 //	                                            "demo" file part.
+//	                      POST /smoke-voxels  — a smoke rebuilt from the voxel
+//	                                            log read live off its projectile.
 //	                      POST /smoke-volume  — the bloom at a point on a map.
 //	                      POST /sightlines    — what a smoke blocks.
 //	                      POST /oneway        — asymmetric visibility through
