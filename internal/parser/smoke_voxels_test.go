@@ -330,7 +330,7 @@ func TestFloodTiming(t *testing.T) {
 // the server sent — here, exactly the bricks a known-size cloud touches.
 func TestFitBudgetRecoversTheCloudSize(t *testing.T) {
 	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
-	order := l.fillOrder(defaultVoxelFlood.budgetMax)
+	order := l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
 	const size = 900
 	var sent [voxelBricks]bool
 	for _, c := range order[:size] {
@@ -344,13 +344,111 @@ func TestFitBudgetRecoversTheCloudSize(t *testing.T) {
 			l.brickTick[b] = -1
 		}
 	}
-	order = l.fillOrder(defaultVoxelFlood.budgetMax)
+	order = l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
 	budget, iou := l.fitBudget(order, defaultVoxelFlood)
 	if iou != 1 {
 		t.Fatalf("best fit scores %.3f, want a perfect match", iou)
 	}
 	if got := l.brickIoU(order[:budget]); got != 1 {
 		t.Fatalf("the fitted cloud scores %.3f on its own", got)
+	}
+}
+
+// ledgeLog is a smoke that went off on a ledge: floor at z=15 for x < 16, a
+// drop to a floor at z=3 beyond it, sources across the lip. sent says which
+// bricks the server sent.
+func ledgeLog(sent func(b int) bool) *voxelLog {
+	var sources []voxelSource
+	for x := 12; x <= 19; x++ {
+		for y := 13; y <= 19; y++ {
+			sources = append(sources, voxelSource{X: uint8(x), Y: uint8(y), Z: 16, V: 5})
+		}
+	}
+	l := openLog(sources...)
+	for y := 0; y < voxelGridDim; y++ {
+		for x := 0; x < voxelGridDim; x++ {
+			l.solid[voxelIndex(x, y, 3)] = true
+			if x < 16 {
+				for z := 4; z <= 15; z++ {
+					l.solid[voxelIndex(x, y, z)] = true
+				}
+			}
+		}
+	}
+	for b := range l.brickTick {
+		if !sent(b) {
+			l.brickTick[b] = -1
+		}
+	}
+	return l
+}
+
+// The bricks a cloud of size voxels from this flood touches, as the server
+// would send them.
+func touchedBricks(l *voxelLog, fall, size int) [voxelBricks]bool {
+	var sent [voxelBricks]bool
+	for _, c := range l.fillOrder(size, fall)[:size] {
+		x, y, z := voxelCoord(c)
+		for _, d := range [7][3]int{{}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}} {
+			nx, ny, nz := x+d[0], y+d[1], z+d[2]
+			if nx >= 0 && ny >= 0 && nz >= 0 && nx < voxelGridDim && ny < voxelGridDim && nz < voxelGridDim {
+				sent[brickOf(nx, ny, nz)] = true
+			}
+		}
+	}
+	return sent
+}
+
+// Off a ledge the bricks the server sent below it decide the shape: a server
+// whose cloud poured to the floor gets a cloud that pours, and one whose cloud
+// hung in the air keeps one that hangs.
+func TestFloodFollowsTheServerOffALedge(t *testing.T) {
+	everything := func(int) bool { return true }
+	for _, fall := range []int{10, voxelStepCost} {
+		sent := touchedBricks(ledgeLog(everything), fall, 900)
+		l := ledgeLog(func(b int) bool { return sent[b] })
+
+		order, budget, iou := l.fitShape(defaultVoxelFlood)
+		if iou < 0.95 {
+			t.Fatalf("fall %d: best fit scores %.3f", fall, iou)
+		}
+		floor := 0
+		for _, c := range order[:budget] {
+			if _, _, z := voxelCoord(c); z == 4 {
+				floor++
+			}
+		}
+		if fall < voxelStepCost && floor == 0 {
+			t.Error("a cloud the server poured to the floor below never reaches it")
+		}
+		if fall == voxelStepCost && floor > 0 {
+			t.Errorf("a cloud the server held up fills %d voxels of the floor below", floor)
+		}
+	}
+}
+
+// On flat ground there is nowhere to fall, so every fall is the same flood:
+// the fit cannot change a cloud that does not hang over anything.
+func TestFallChangesNothingOnFlatGround(t *testing.T) {
+	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
+	for y := 0; y < voxelGridDim; y++ {
+		for x := 0; x < voxelGridDim; x++ {
+			for z := 0; z <= 15; z++ {
+				l.solid[voxelIndex(x, y, z)] = true
+			}
+		}
+	}
+	even := l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
+	for _, fall := range defaultVoxelFlood.falls {
+		got := l.fillOrder(defaultVoxelFlood.budgetMax, fall)
+		if len(got) != len(even) {
+			t.Fatalf("fall %d fills %d voxels, the even flood %d", fall, len(got), len(even))
+		}
+		for i := range got {
+			if got[i] != even[i] {
+				t.Fatalf("fall %d reaches voxel %d out of order", fall, i)
+			}
+		}
 	}
 }
 
