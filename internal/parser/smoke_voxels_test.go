@@ -383,52 +383,43 @@ func ledgeLog(sent func(b int) bool) *voxelLog {
 	return l
 }
 
-// The bricks a cloud of size voxels from this flood touches, as the server
-// would send them.
-func touchedBricks(l *voxelLog, fall, size int) [voxelBricks]bool {
-	var sent [voxelBricks]bool
-	for _, c := range l.fillOrder(size, fall)[:size] {
-		x, y, z := voxelCoord(c)
-		for _, d := range [7][3]int{{}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}} {
-			nx, ny, nz := x+d[0], y+d[1], z+d[2]
-			if nx >= 0 && ny >= 0 && nz >= 0 && nx < voxelGridDim && ny < voxelGridDim && nz < voxelGridDim {
-				sent[brickOf(nx, ny, nz)] = true
-			}
-		}
-	}
-	return sent
-}
-
-// Off a ledge the bricks the server sent below it decide the shape: a server
-// whose cloud poured to the floor gets a cloud that pours, and one whose cloud
-// hung in the air keeps one that hangs.
-func TestFloodFollowsTheServerOffALedge(t *testing.T) {
-	everything := func(int) bool { return true }
-	for _, fall := range []int{10, voxelStepCost} {
-		sent := touchedBricks(ledgeLog(everything), fall, 900)
-		l := ledgeLog(func(b int) bool { return sent[b] })
-
-		order, budget, iou := l.fitShape(defaultVoxelFlood)
-		if iou < 0.95 {
-			t.Fatalf("fall %d: best fit scores %.3f", fall, iou)
-		}
-		floor := 0
-		for _, c := range order[:budget] {
+// A smoke that goes off on a ledge pours over it to the floor below, as the
+// game's does, rather than hanging beside it in a ball.
+func TestFloodPoursOffALedge(t *testing.T) {
+	l := ledgeLog(func(int) bool { return true })
+	floor := func(cells []int) int {
+		n := 0
+		for _, c := range cells {
 			if _, _, z := voxelCoord(c); z == 4 {
-				floor++
+				n++
 			}
 		}
-		if fall < voxelStepCost && floor == 0 {
-			t.Error("a cloud the server poured to the floor below never reaches it")
+		return n
+	}
+	p := defaultVoxelFlood
+	poured := l.fillOrder(p.budget, p.fall)
+	even := l.fillOrder(p.budget, voxelStepCost)
+	if floor(even) != 0 {
+		t.Fatalf("the even flood already reaches the floor below (%d voxels); the ledge is too low to tell", floor(even))
+	}
+	if floor(poured) == 0 {
+		t.Fatal("the cloud never reaches the floor below the ledge")
+	}
+
+	arrival := l.flood(p, 64)
+	reached := false
+	for i, a := range arrival {
+		if _, _, z := voxelCoord(i); a >= 0 && z == 4 {
+			reached = true
 		}
-		if fall == voxelStepCost && floor > 0 {
-			t.Errorf("a cloud the server held up fills %d voxels of the floor below", floor)
-		}
+	}
+	if !reached {
+		t.Error("the reconstructed cloud never reaches the floor below the ledge")
 	}
 }
 
-// On flat ground there is nowhere to fall, so every fall is the same flood:
-// the fit cannot change a cloud that does not hang over anything.
+// On flat ground there is nowhere to fall, so the pouring flood is the even
+// one: a cloud that does not hang over anything keeps its shape.
 func TestFallChangesNothingOnFlatGround(t *testing.T) {
 	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
 	for y := 0; y < voxelGridDim; y++ {
@@ -439,7 +430,7 @@ func TestFallChangesNothingOnFlatGround(t *testing.T) {
 		}
 	}
 	even := l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
-	for _, fall := range defaultVoxelFlood.falls {
+	for _, fall := range []int{defaultVoxelFlood.fall} {
 		got := l.fillOrder(defaultVoxelFlood.budgetMax, fall)
 		if len(got) != len(even) {
 			t.Fatalf("fall %d fills %d voxels, the even flood %d", fall, len(got), len(even))

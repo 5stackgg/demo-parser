@@ -36,13 +36,13 @@ import (
 // below. This does the same in two passes:
 //
 //   - Shape: a flood from the sources through free voxels of the bricks the
-//     server sent, cheapest first, where a step down costs less than a step
-//     sideways or up, stopped at a voxel budget. How much less, and the
-//     budget, are fitted per smoke: the server sends every brick its cloud
-//     reached or touched, so the right cloud is the one whose one-voxel shell
-//     covers those bricks and no others. On flat ground every fall gives the
-//     same cloud; off a ledge the bricks the server sent below it say how far
-//     the real one poured.
+//     server sent, cheapest first, where a step down costs a tenth of a step
+//     sideways or up, so it pours to the floor before it spreads, stopped at a
+//     voxel budget. The budget is fitted per smoke: the server sends every
+//     brick its cloud reached or touched, so the right size is the one whose
+//     one-voxel shell covers those bricks and no others. The bricks are too
+//     coarse to say how far a cloud poured, so the fall is not fitted: on flat
+//     ground it changes nothing, and off a ledge the game's cloud pours.
 //   - Timing: when each voxel of that shape filled. It spreads one voxel per
 //     step from the sources, and never into a brick before the server sent it,
 //     so growth follows the server's own clock at brick resolution.
@@ -71,11 +71,11 @@ var defaultVoxelFlood = voxelFloodParams{
 	budgetMin: 600,
 	budgetMax: 1100,
 	stepSecs:  6.0 / 64,
-	falls:     []int{voxelStepCost, 55, 30, 10},
+	fall:      10,
 }
 
 // voxelStepCost is what a step sideways or up costs in the shape flood; a
-// step down costs one of the fitted falls instead.
+// step down costs fall instead.
 const voxelStepCost = 100
 
 // voxelFloodParams shapes the reconstruction.
@@ -84,15 +84,14 @@ const voxelStepCost = 100
 // apart; budgetMin and budgetMax bound the per-smoke fit. stepSecs is how long
 // the cloud takes to advance one voxel where the server's bricks do not hold
 // it back: half of a cloud's bricks arrive on the detonation frame, and without
-// a pace that half would appear at once. falls are the costs of a step down
-// the fit tries, against voxelStepCost for any other step, preferred in order
-// when the bricks cannot tell them apart.
+// a pace that half would appear at once. fall is the cost of a step down,
+// against voxelStepCost for any other step.
 type voxelFloodParams struct {
 	budget    int
 	budgetMin int
 	budgetMax int
 	stepSecs  float64
-	falls     []int
+	fall      int
 }
 
 type voxelSource struct {
@@ -336,20 +335,6 @@ func (l *voxelLog) fillOrder(limit, fall int) []int {
 	return order
 }
 
-// fitShape is the flood, among the falls p tries, and the volume of it that
-// best match the bricks the server sent.
-func (l *voxelLog) fitShape(p voxelFloodParams) (order []int, budget int, iou float64) {
-	iou = -1
-	for _, fall := range p.falls {
-		o := l.fillOrder(p.budgetMax, fall)
-		b, score := l.fitBudget(o, p)
-		if score > iou+1e-9 {
-			order, budget, iou = o, b, score
-		}
-	}
-	return order, budget, iou
-}
-
 // brickCover scores a growing cloud against the bricks the server sent. The
 // server sends every brick its cloud occupied or bordered, so the comparison is
 // with the bricks ours occupies or borders: intersection over union.
@@ -498,7 +483,8 @@ func (l *voxelLog) timeShape(cells []int, stepTicks int) []int {
 // flood reconstructs the cloud: ticks after detonation each voxel filled, -1
 // for voxels it never reached.
 func (l *voxelLog) flood(p voxelFloodParams, tickRate float64) []int {
-	order, budget, _ := l.fitShape(p)
+	order := l.fillOrder(p.budgetMax, p.fall)
+	budget, _ := l.fitBudget(order, p)
 	return l.timeShape(order[:budget], int(math.Round(p.stepSecs*tickRate)))
 }
 
