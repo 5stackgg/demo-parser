@@ -11,7 +11,6 @@ Please visit [5Stack](https://docs.5stack.gg) for more documentation.
 | Endpoint | Body | Answers |
 | --- | --- | --- |
 | `POST /parse` | `{"demo_url": "..."}` | parsed `Result` JSON |
-| `POST /parse-file` | multipart, `demo` part | parsed `Result` JSON |
 | `POST /smoke-voxels` | `{"log","samples","detonation","tick_rate"}` | a smoke rebuilt from its live voxel log |
 | `POST /smoke-volume` | `{"map","x","y","z"}` | the bloom at a point |
 | `POST /sightlines` | map + smoke(s) + eye-position pairs | what the smoke blocks |

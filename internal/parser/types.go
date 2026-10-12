@@ -41,7 +41,7 @@ type EventKill struct {
 	VictimX            *float32 `json:"victim_x,omitempty"`
 	VictimY            *float32 `json:"victim_y,omitempty"`
 	VictimZ            *float32 `json:"victim_z,omitempty"`
-	VictimUtilityValue *int     `json:"victim_utility_value,omitempty"`
+	VictimUtilityValue *int     `json:"-"` // only computeTrades reads it, as util_on_death
 }
 
 // EventBomb is a single timeline entry for a bomb interaction. Type
