@@ -202,6 +202,12 @@ type voxelLog struct {
 	brickTick [voxelBricks]int
 	solid     [voxelCells]bool
 	frames    int
+
+	// next is the offset just past the last frame read decoded.
+	next int
+	// broken stops reading a log that failed to decode, keeping what arrived
+	// before it.
+	broken bool
 }
 
 func newVoxelLog() *voxelLog {
@@ -210,6 +216,23 @@ func newVoxelLog() *voxelLog {
 		l.brickTick[i] = -1
 	}
 	return l
+}
+
+// read decodes the frames buf, the raw log so far, completed since the last
+// call, stamping them with tick (relative to detonation). The demo and the
+// live endpoint both read through here, so the same reads give the same cloud.
+func (l *voxelLog) read(buf []byte, tick int) {
+	if l.broken {
+		return
+	}
+	frames, n, err := decodeVoxelFrames(buf[l.next:])
+	l.next += n
+	for _, f := range frames {
+		l.apply(f, tick)
+	}
+	if err != nil {
+		l.broken = true
+	}
 }
 
 // apply folds a decoded frame in, as having arrived at tick (relative to
@@ -400,7 +423,13 @@ func (l *voxelLog) timeShape(cells []int, stepTicks int) []int {
 		}
 	}
 	for _, s := range l.sources {
-		if i := voxelIndex(int(s.X), int(s.Y), int(s.Z)); in[i] {
+		// A source outside the grid fills nothing (as in fillOrder), and must
+		// not index past it: a log from a request can say anything.
+		x, y, z := int(s.X), int(s.Y), int(s.Z)
+		if x >= voxelGridDim || y >= voxelGridDim || z >= voxelGridDim {
+			continue
+		}
+		if i := voxelIndex(x, y, z); in[i] {
 			push(i, 0)
 		}
 	}
@@ -430,6 +459,18 @@ func (l *voxelLog) flood(p voxelFloodParams, tickRate float64) []int {
 	order := l.fillOrder(p.budgetMax)
 	budget, _ := l.fitBudget(order, p)
 	return l.timeShape(order[:budget], int(math.Round(p.stepSecs*tickRate)))
+}
+
+// export reconstructs and packs the cloud around det. ok is false when the log
+// holds nothing to reconstruct from.
+func (l *voxelLog) export(det r3.Vector, tickRate float64, p voxelFloodParams) (EventSmokeVoxels, bool) {
+	if len(l.sources) == 0 || (det.X == 0 && det.Y == 0 && det.Z == 0) {
+		return EventSmokeVoxels{}, false
+	}
+	if tickRate <= 0 {
+		tickRate = 64
+	}
+	return exportVoxels(l.flood(p, tickRate), det, tickRate)
 }
 
 type voxelEntry struct {
@@ -537,12 +578,8 @@ type smokeVoxelTrack struct {
 	startTick int
 	det       r3.Vector
 
-	buf  []byte
-	next int
-	log  *voxelLog
-	// broken stops reading a log that failed to decode, keeping what arrived
-	// before it.
-	broken bool
+	buf []byte
+	log *voxelLog
 }
 
 func newSmokeVoxelTrack(entity st.Entity, gid, round, startTick int) *smokeVoxelTrack {
@@ -557,7 +594,7 @@ func (t *smokeVoxelTrack) poll(tick int) {
 			t.det = *d
 		}
 	}
-	if t.broken {
+	if t.log.broken {
 		return
 	}
 	v, ok := t.entity.PropertyValue("m_nVoxelFrameDataSize")
@@ -577,26 +614,13 @@ func (t *smokeVoxelTrack) poll(tick int) {
 		u, _ := propUint(b)
 		t.buf = append(t.buf, byte(u))
 	}
-	frames, n, err := decodeVoxelFrames(t.buf[t.next:])
-	t.next += n
-	for _, f := range frames {
-		t.log.apply(f, tick-t.startTick)
-	}
-	if err != nil {
-		t.broken = true
-	}
+	t.log.read(t.buf, tick-t.startTick)
 }
 
 // export reconstructs and packs the cloud. ok is false when the smoke
 // networked nothing to reconstruct from.
 func (t *smokeVoxelTrack) export(endTick int, tickRate float64, p voxelFloodParams) (EventSmokeVoxels, bool) {
-	if len(t.log.sources) == 0 || (t.det.X == 0 && t.det.Y == 0 && t.det.Z == 0) {
-		return EventSmokeVoxels{}, false
-	}
-	if tickRate <= 0 {
-		tickRate = 64
-	}
-	out, ok := exportVoxels(t.log.flood(p, tickRate), t.det, tickRate)
+	out, ok := t.log.export(t.det, tickRate, p)
 	if !ok {
 		return out, false
 	}
@@ -605,6 +629,60 @@ func (t *smokeVoxelTrack) export(endTick int, tickRate float64, p voxelFloodPara
 	out.StartTick = t.startTick
 	out.EndTick = endTick
 	return out, true
+}
+
+// ErrNoSmokeVoxels means a voxel log held nothing to rebuild a cloud from: no
+// source points, no detonation position, or no complete frame.
+var ErrNoSmokeVoxels = errors.New("voxel log holds no smoke to reconstruct")
+
+// maxReconstructTickRate and maxReconstructTick bound a request's timing:
+// well past any real server, well short of overflowing a tick.
+const (
+	maxReconstructTickRate = 1024
+	maxReconstructTick     = maxReconstructTickRate * 600
+)
+
+// ReconstructSmokeVoxels rebuilds a smoke from a voxel log read live off its
+// projectile instead of out of a demo. buf is the log as it finally stood;
+// samples are [length, tick after detonation] for each tick it grew, the reads
+// poll makes every demo frame, so the cloud is the one the playback blob would
+// carry. StartTick is 0 and EndTick the last sample's tick.
+func ReconstructSmokeVoxels(buf []byte, samples [][2]int, det r3.Vector, tickRate float64) (EventSmokeVoxels, error) {
+	if len(buf) > voxelFrameDataSlots {
+		return EventSmokeVoxels{}, fmt.Errorf("log is %d bytes; the networked array holds %d", len(buf), voxelFrameDataSlots)
+	}
+	// Bounded so the timing arithmetic cannot overflow: CS2 runs at 64, and a
+	// cloud finishes growing within seconds.
+	if tickRate > maxReconstructTickRate {
+		return EventSmokeVoxels{}, fmt.Errorf("tick rate %v is above %d", tickRate, maxReconstructTickRate)
+	}
+	l := newVoxelLog()
+	seen, end := 0, 0
+	for i, s := range samples {
+		size, tick := s[0], s[1]
+		if size < 0 || size > len(buf) {
+			return EventSmokeVoxels{}, fmt.Errorf("sample %d: length %d is outside the %d-byte log", i, size, len(buf))
+		}
+		if tick < end {
+			return EventSmokeVoxels{}, fmt.Errorf("sample %d: tick %d is before %d", i, tick, end)
+		}
+		if tick > maxReconstructTick {
+			return EventSmokeVoxels{}, fmt.Errorf("sample %d: tick %d is more than %d after detonation", i, tick, maxReconstructTick)
+		}
+		end = tick
+		// As in poll, only growth is read.
+		if size <= seen {
+			continue
+		}
+		seen = size
+		l.read(buf[:size], tick)
+	}
+	out, ok := l.export(det, tickRate, defaultVoxelFlood)
+	if !ok {
+		return out, ErrNoSmokeVoxels
+	}
+	out.EndTick = end
+	return out, nil
 }
 
 // openSmokeVoxels starts reading a smoke's voxel log. It is keyed by entity

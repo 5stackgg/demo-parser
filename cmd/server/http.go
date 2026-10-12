@@ -35,6 +35,7 @@ func runServer() {
 	mux.HandleFunc("/parse", handleParse)
 	mux.HandleFunc("/parse-file", handleParseFile)
 	mux.HandleFunc("/smoke-volume", handleSmokeVolume)
+	mux.HandleFunc("/smoke-voxels", handleSmokeVoxels)
 	mux.HandleFunc("/sightlines", handleSightlines)
 	mux.HandleFunc("/oneway", handleOneway)
 	mux.HandleFunc("/drift", handleDrift)

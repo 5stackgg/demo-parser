@@ -122,8 +122,10 @@ func TestParseExportsSmokeVoxels(t *testing.T) {
 }
 
 // collectVoxelTracks reads every smoke's voxel log off a demo, the way the
-// parser does, and keeps them for inspection.
-func collectVoxelTracks(t *testing.T, path string) []*smokeVoxelTrack {
+// parser does, and keeps them for inspection. samples holds, per track, the
+// log length and detonation-relative tick of every poll that grew it: what a
+// server plugin polling the projectile would send.
+func collectVoxelTracks(t *testing.T, path string) (tracks []*smokeVoxelTrack, samples map[*smokeVoxelTrack][][2]int) {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -133,12 +135,12 @@ func collectVoxelTracks(t *testing.T, path string) []*smokeVoxelTrack {
 	p := dem.NewParser(f)
 	defer p.Close()
 	live := map[int]*smokeVoxelTrack{}
-	var all []*smokeVoxelTrack
+	samples = map[*smokeVoxelTrack][][2]int{}
 	p.RegisterEventHandler(func(e events.SmokeStart) {
 		if ent := p.GameState().Entities()[e.GrenadeEntityID]; ent != nil {
 			tr := newSmokeVoxelTrack(ent, 0, 0, p.GameState().IngameTick())
 			live[e.GrenadeEntityID] = tr
-			all = append(all, tr)
+			tracks = append(tracks, tr)
 		}
 	})
 	p.RegisterEventHandler(func(events.FrameDone) {
@@ -148,12 +150,73 @@ func collectVoxelTracks(t *testing.T, path string) []*smokeVoxelTrack {
 				delete(live, id)
 				continue
 			}
+			had := len(tr.buf)
 			tr.poll(tick)
+			if len(tr.buf) > had {
+				samples[tr] = append(samples[tr], [2]int{len(tr.buf), tick - tr.startTick})
+			}
 		}
 	})
 	// test.dem ends mid-packet; everything before that is intact.
 	_ = p.ParseToEnd()
-	return all
+	return tracks, samples
+}
+
+// The live endpoint gets the log a plugin read off the projectile and the
+// ticks it grew on. Given exactly what the demo path read, it must rebuild the
+// cloud the playback blob carries.
+func TestReconstructSmokeVoxelsMatchesTheDemo(t *testing.T) {
+	res := parseTestDemo(t)
+	tracks, samples := collectVoxelTracks(t, testDemo(t))
+	if len(tracks) != len(res.SmokeVoxels) {
+		t.Fatalf("%d tracks, %d exported smokes", len(tracks), len(res.SmokeVoxels))
+	}
+	timed := 0
+	for i, tr := range tracks {
+		want := res.SmokeVoxels[i]
+		if tr.startTick != want.StartTick {
+			t.Fatalf("track %d starts at %d, exported smoke at %d", i, tr.startTick, want.StartTick)
+		}
+		s := samples[tr]
+		if len(s) < 2 || s[0][1] != 0 || s[len(s)-1][0] != len(tr.buf) {
+			t.Fatalf("smoke %d: samples %v for a %d-byte log", want.StartTick, s, len(tr.buf))
+		}
+		got, err := ReconstructSmokeVoxels(tr.buf, s, tr.det, res.TickRate)
+		if err != nil {
+			t.Fatalf("smoke %d: %v", want.StartTick, err)
+		}
+		if got.OriginX != want.OriginX || got.OriginY != want.OriginY || got.OriginZ != want.OriginZ ||
+			got.VoxelSize != want.VoxelSize ||
+			got.DimX != want.DimX || got.DimY != want.DimY || got.DimZ != want.DimZ {
+			t.Fatalf("smoke %d: box %+v, want %+v", want.StartTick, got, want)
+		}
+		if got.Arrival != want.Arrival {
+			t.Fatalf("smoke %d: arrival differs from the demo's", want.StartTick)
+		}
+		if got.GrenadeID != 0 || got.Round != 0 || got.StartTick != 0 || got.EndTick != s[len(s)-1][1] {
+			t.Errorf("smoke %d: gid %d round %d ticks %d–%d, want 0 0 0–%d",
+				want.StartTick, got.GrenadeID, got.Round, got.StartTick, got.EndTick, s[len(s)-1][1])
+		}
+		t.Logf("smoke %d: %d bytes over %d samples, last at tick %d", want.StartTick, len(tr.buf), len(s), s[len(s)-1][1])
+
+		// The whole log on the detonation tick has the same shape; only the
+		// timing, which comes from when each brick arrived, can differ.
+		at0, err := ReconstructSmokeVoxels(tr.buf, [][2]int{{len(tr.buf), 0}}, tr.det, res.TickRate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if at0.DimX != want.DimX || at0.DimY != want.DimY || at0.DimZ != want.DimZ {
+			t.Errorf("smoke %d: one sample at tick 0 should keep the box", want.StartTick)
+		}
+		if at0.Arrival != want.Arrival {
+			timed++
+		}
+	}
+	// Where the server sends a brick before the step pace reaches it, its
+	// arrival changes nothing, so this holds for some smokes and not all.
+	if timed == 0 {
+		t.Error("no smoke's timing depends on its samples; the test would pass without them")
+	}
 }
 
 // TestSmokeVoxelCalibration is where defaultVoxelFlood's numbers come from.
@@ -180,7 +243,7 @@ func collectVoxelTracks(t *testing.T, path string) []*smokeVoxelTrack {
 // a voxel the fitted clouds are 40–50% filled by 16 ticks and 96–100% by 32;
 // at two or four ticks most of the cloud is in by 16, ahead of the server.
 func TestSmokeVoxelCalibration(t *testing.T) {
-	tracks := collectVoxelTracks(t, testDemo(t))
+	tracks, _ := collectVoxelTracks(t, testDemo(t))
 	if len(tracks) != len(testDemoSmokes) {
 		t.Fatalf("%d smokes, want %d", len(tracks), len(testDemoSmokes))
 	}
