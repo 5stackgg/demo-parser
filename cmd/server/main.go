@@ -7,8 +7,6 @@
 //	demo-parser server  HTTP service:
 //	                      POST /parse         — JSON {demo_url} body;
 //	                                            server fetches the demo.
-//	                      POST /parse-file    — multipart upload with a
-//	                                            "demo" file part.
 //	                      POST /smoke-voxels  — a smoke rebuilt from the voxel
 //	                                            log read live off its projectile.
 //	                      POST /smoke-volume  — the bloom at a point on a map.

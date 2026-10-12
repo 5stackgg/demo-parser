@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,7 +32,6 @@ func runServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/parse", handleParse)
-	mux.HandleFunc("/parse-file", handleParseFile)
 	mux.HandleFunc("/smoke-volume", handleSmokeVolume)
 	mux.HandleFunc("/smoke-voxels", handleSmokeVoxels)
 	mux.HandleFunc("/sightlines", handleSightlines)
@@ -222,58 +220,6 @@ func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
 	}
 	log.Printf("[%s] unrecognized demo magic: %q", logPrefix, magic)
 	return nil, fmt.Errorf("unrecognized demo content: %q", magic)
-}
-
-// handleParseFile is the pre-upload entry point used by a game-server
-// node that has the .dem on local disk. The .dem streams in via
-// multipart/form-data on the "demo" field — never buffered to memory
-// or disk.
-func handleParseFile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mr, err := r.MultipartReader()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("bad multipart: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	var (
-		filePart *multipart.Part
-		fileName string
-	)
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			http.Error(w, fmt.Sprintf("read part: %v", err), http.StatusBadRequest)
-			return
-		}
-		if part.FormName() == "demo" {
-			filePart = part
-			fileName = part.FileName()
-			break
-		}
-		_ = part.Close()
-	}
-
-	if filePart == nil {
-		http.Error(w, "missing 'demo' form field", http.StatusBadRequest)
-		return
-	}
-	defer filePart.Close()
-
-	logPrefix := fileName
-	if logPrefix == "" {
-		logPrefix = "<no-name>"
-	}
-	log.Printf("[%s] parsing uploaded demo", logPrefix)
-
-	parseAndRespond(w, filePart, logPrefix)
 }
 
 func parseAndRespond(w http.ResponseWriter, body io.Reader, logPrefix string) {
