@@ -20,8 +20,9 @@ import (
 )
 
 type parseRequest struct {
-	MatchMapDemoID string `json:"match_map_demo_id"`
-	DemoURL        string `json:"demo_url"`
+	MatchMapDemoID string           `json:"match_map_demo_id"`
+	DemoURL        string           `json:"demo_url"`
+	Playback       *playbackRequest `json:"playback,omitempty"`
 }
 
 func runServer() {
@@ -91,21 +92,37 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp := parseResponse{Result: result}
+	var blobNote string
+	if req.Playback.wanted() {
+		pb, took, err := buildPlayback(result, req.Playback)
+		if err != nil {
+			// The full result still answers: the api builds the blob from it.
+			log.Printf("[%s] playback blob: %v", logPrefix, err)
+		} else {
+			resp.Playback = pb
+			blobNote = fmt.Sprintf(", blob %s (%d bytes)", took.Round(time.Millisecond), len(pb.Blob))
+		}
+	} else if req.Playback != nil {
+		log.Printf("[%s] playback blob v%d not built (this parser builds v%d); answering with the full parse",
+			logPrefix, req.Playback.SchemaVersion, parser.PlaybackSchemaVersion)
+	}
+
 	respondStart := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	cw := &countingWriter{w: w}
-	if err := json.NewEncoder(cw).Encode(result); err != nil {
+	if err := json.NewEncoder(cw).Encode(resp); err != nil {
 		log.Printf("[%s] response encode: %v", logPrefix, err)
 	}
 	// One line with the whole request, so a slow import can be read off the
 	// parser's log without adding up the lines above it. Download and parse
 	// overlap: the parse starts on the first bytes and follows the download.
 	log.Printf(
-		"[%s] done in %s: download %s (%d bytes), parse %s, respond %s (%d bytes)%s",
+		"[%s] done in %s: download %s (%d bytes), parse %s%s, respond %s (%d bytes)%s",
 		logPrefix, time.Since(start).Round(time.Millisecond),
 		t.download.Round(time.Millisecond), t.size, t.parse.Round(time.Millisecond),
-		time.Since(respondStart).Round(time.Millisecond), cw.n, t.attemptsNote(),
+		blobNote, time.Since(respondStart).Round(time.Millisecond), cw.n, t.attemptsNote(),
 	)
 }
 
