@@ -4,7 +4,6 @@ import (
 	"math"
 
 	"github.com/golang/geo/r3"
-	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 )
 
 // CS2 renders with Hor+ scaling off a 90° horizontal FOV at 4:3. That keeps the
@@ -71,40 +70,22 @@ func (s *state) trackFOV() {
 	}
 	tick := s.parser.GameState().IngameTick()
 
-	type pinfo struct {
-		sid        string
-		eye        r3.Vector
-		feet       r3.Vector
-		yaw, pitch float32
-		team       common.Team
-		blind      float64
-	}
-	var infos []pinfo
-	for _, p := range s.parser.GameState().Participants().Playing() {
-		if p == nil || !p.IsAlive() {
+	infos := s.framePlayers
+	seen := s.fovSeen
+	clear(seen)
+	for i := range infos {
+		a := &infos[i]
+		if !a.alive {
 			continue
 		}
-		sid := steamIDStr(p)
-		if sid == "" {
-			continue
-		}
-		eye, _ := p.PositionEyes()
-		infos = append(infos, pinfo{
-			sid: sid, eye: eye, feet: p.Position(),
-			yaw: p.ViewDirectionX(), pitch: p.ViewDirectionY(), team: p.Team,
-			blind: p.FlashDurationTimeRemaining().Seconds(),
-		})
-	}
-
-	seen := map[[2]string]bool{}
-	for _, a := range infos {
 		// A player still blinded by a flash isn't seeing anyone appear, so no
 		// anchor should be recorded against them.
 		if a.blind > blindCutoffSecs {
 			continue
 		}
-		for _, v := range infos {
-			if a.sid == v.sid || a.team == v.team {
+		for j := range infos {
+			v := &infos[j]
+			if !v.alive || a.sid == v.sid || a.team == v.team {
 				continue
 			}
 			if !onScreen(a.eye, a.yaw, a.pitch, v.eye) {
@@ -122,7 +103,7 @@ func (s *state) trackFOV() {
 				continue
 			}
 			s.fovLosProbe[key] = tick
-			if !s.visibleAt(tick, a.eye, v.eye, v.feet) {
+			if !s.visibleAt(tick, a.eye, v.eye, v.pos) {
 				continue
 			}
 			if s.fovEntry[v.sid] == nil {
@@ -131,7 +112,7 @@ func (s *state) trackFOV() {
 			s.fovEntry[v.sid][a.sid] = visEntry{
 				tick: tick, yaw: a.yaw, pitch: a.pitch, eye: a.eye,
 				target:     v.eye,
-				targetFeet: v.feet,
+				targetFeet: v.pos,
 				targetView: s.eyeAsRendered(v.sid, tick, v.eye),
 			}
 		}

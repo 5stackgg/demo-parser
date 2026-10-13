@@ -4,9 +4,73 @@ import (
 	"math"
 	"sort"
 
+	"github.com/golang/geo/r3"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
 )
+
+// tickPlayer is one playing player as the current frame left them, read off
+// the entities once and shared by everything onFrameDone drives. Every
+// accessor on common.Player resolves the pawn and looks its properties up by
+// name, so reading each player once per consumer — the frame sample, the FOV
+// pass, the position ring — cost more than the work done with the values.
+type tickPlayer struct {
+	p     *common.Player
+	sid   string
+	team  common.Team
+	alive bool
+	pos   r3.Vector
+	yaw   float32
+	pitch float32
+	// eye and blind are read only for living players; nothing asks them of the
+	// dead.
+	eye   r3.Vector
+	blind float64
+}
+
+// snapshotPlayers fills s.framePlayers with every playing player that has a
+// SteamID, in Participants().Playing() order — the order each consumer used
+// to walk.
+func (s *state) snapshotPlayers() {
+	s.framePlayers = s.framePlayers[:0]
+	for _, p := range s.parser.GameState().Participants().Playing() {
+		if p == nil {
+			continue
+		}
+		sid := s.steamID(p)
+		if sid == "" {
+			continue
+		}
+		tp := tickPlayer{
+			p:     p,
+			sid:   sid,
+			team:  p.Team,
+			alive: p.IsAlive(),
+			pos:   p.Position(),
+			yaw:   p.ViewDirectionX(),
+			pitch: p.ViewDirectionY(),
+		}
+		if tp.alive {
+			tp.eye, _ = p.PositionEyes()
+			tp.blind = p.FlashDurationTimeRemaining().Seconds()
+		}
+		s.framePlayers = append(s.framePlayers, tp)
+	}
+}
+
+// steamID is steamIDStr without formatting the same handful of IDs every
+// frame.
+func (s *state) steamID(p *common.Player) string {
+	if p == nil || p.SteamID64 == 0 {
+		return ""
+	}
+	sid, ok := s.sids[p.SteamID64]
+	if !ok {
+		sid = steamIDStr(p)
+		s.sids[p.SteamID64] = sid
+	}
+	return sid
+}
 
 // onFrameDone samples per-player position/velocity each tick. Used by
 // WeaponFire to annotate shots with speed + counter-strafe state.
@@ -18,17 +82,16 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	s.tickRate = tickRate
 	s.resolveHits()
 	curTick := s.parser.GameState().IngameTick()
-	seen := map[string]bool{}
-	for _, p := range s.parser.GameState().Participants().Playing() {
-		if p == nil || !p.IsAlive() {
+	s.snapshotPlayers()
+	clear(s.frameSeen)
+	for i := range s.framePlayers {
+		tp := &s.framePlayers[i]
+		if !tp.alive {
 			continue
 		}
-		sid := steamIDStr(p)
-		if sid == "" {
-			continue
-		}
-		seen[sid] = true
-		pos := p.Position()
+		sid := tp.sid
+		s.frameSeen[sid] = true
+		pos := tp.pos
 		prev, hadPrev := s.frames[sid]
 		var (
 			speed    float32
@@ -43,26 +106,25 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 				hasSpeed = true
 			}
 		}
-		eye, _ := p.PositionEyes()
 		s.frames[sid] = playerFrame{
 			pos:            pos,
 			speed:          speed,
 			hasSpeed:       hasSpeed,
-			team:           p.Team,
+			team:           tp.team,
 			alive:          true,
 			tick:           curTick,
-			yaw:            p.ViewDirectionX(),
-			pitch:          p.ViewDirectionY(),
-			eye:            eye,
-			blindRemaining: p.FlashDurationTimeRemaining().Seconds(),
+			yaw:            tp.yaw,
+			pitch:          tp.pitch,
+			eye:            tp.eye,
+			blindRemaining: tp.blind,
 		}
-		s.recordEye(sid, curTick, eye)
+		s.recordEye(sid, curTick, tp.eye)
 		if hasSpeed && speed > 100 {
 			s.lastMoveTick[sid] = curTick
 		}
 	}
 	for sid, f := range s.frames {
-		if !seen[sid] && f.alive {
+		if !s.frameSeen[sid] && f.alive {
 			f.alive = false
 			s.frames[sid] = f
 		}
@@ -156,33 +218,27 @@ func (s *state) capturePositions(tick int) *positionSample {
 	// SteamID is the only identity that survives reliably.
 	var carrierSID string
 	if b := s.parser.GameState().Bomb(); b != nil && b.Carrier != nil {
-		carrierSID = steamIDStr(b.Carrier)
+		carrierSID = s.steamID(b.Carrier)
 	}
-	for _, p := range s.parser.GameState().Participants().Playing() {
-		if p == nil {
-			continue
-		}
-		sid := steamIDStr(p)
-		if sid == "" {
-			continue
-		}
-		pos := p.Position()
+	for i := range s.framePlayers {
+		tp := &s.framePlayers[i]
+		p := tp.p
 		slot.rows = append(slot.rows, EventPosition{
 			Tick:            tick,
 			Round:           s.currentRound,
-			AttackerSteamID: sid,
-			Team:            teamCode(p.Team),
-			Alive:           p.IsAlive(),
-			X:               float32(pos.X),
-			Y:               float32(pos.Y),
-			Z:               float32(pos.Z),
-			Yaw:             p.ViewDirectionX(),
-			Pitch:           p.ViewDirectionY(),
+			AttackerSteamID: tp.sid,
+			Team:            teamCode(tp.team),
+			Alive:           tp.alive,
+			X:               float32(tp.pos.X),
+			Y:               float32(tp.pos.Y),
+			Z:               float32(tp.pos.Z),
+			Yaw:             tp.yaw,
+			Pitch:           tp.pitch,
 			Health:          p.Health(),
 			Armor:           p.Armor(),
 			HasHelmet:       p.HasHelmet(),
-			HasBomb:         carrierSID != "" && sid == carrierSID,
-			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
+			HasBomb:         carrierSID != "" && tp.sid == carrierSID,
+			HasDefuser:      tp.team == common.TeamCounterTerrorists && p.HasDefuseKit(),
 			ActiveWeapon:    activeWeaponName(p),
 			Ducked:          p.IsDucking(),
 		})

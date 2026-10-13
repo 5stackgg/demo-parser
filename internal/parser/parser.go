@@ -45,6 +45,14 @@ type state struct {
 	// Per-player position/velocity sampled each FrameDone.
 	frames map[string]playerFrame
 
+	// This frame's playing players, read once by snapshotPlayers for every
+	// per-frame consumer. sids memoizes their formatted SteamIDs; frameSeen and
+	// fovSeen are per-frame scratch sets kept to be cleared, not reallocated.
+	framePlayers []tickPlayer
+	sids         map[uint64]string
+	frameSeen    map[string]bool
+	fovSeen      map[[2]string]bool
+
 	// Per-attacker last shot: used to flag spray shots (250ms window)
 	// and to match damage to the shot behind it.
 	lastShot map[string]shotMark
@@ -71,7 +79,10 @@ type state struct {
 	smokes     []smokeCloud
 	smokeByEnt map[int]int
 	// Voxel logs being read off live smoke projectiles, by entity id.
-	voxelTracks   map[int]*smokeVoxelTrack
+	voxelTracks map[int]*smokeVoxelTrack
+	// Clouds whose logs have closed, replaying off the parse goroutine until
+	// finalize collects them.
+	voxelJobs     []*voxelExport
 	voxelSkipped  int
 	voxelBoxCells int
 	// Explosions currently holding a hole open in the smoke.
@@ -129,6 +140,11 @@ type state struct {
 	// (unknown map / no .tri / disabled) means los() never filters.
 	mesh      *geometry.Mesh
 	meshTried bool
+	// meshFetch is the load prefetchMesh started for meshFetchMap, the map
+	// the demo announced, so the download and BVH build run while the
+	// warmup is still being parsed rather than stalling the first sightline.
+	meshFetch    chan meshLoad
+	meshFetchMap string
 
 	// steam_id → display name. Flattened to res.Players at the end.
 	playerNames map[string]string
@@ -190,6 +206,9 @@ func Parse(r io.Reader) (*Result, error) {
 		res:          &Result{},
 		visStart:     map[string]map[string]visEntry{},
 		frames:       map[string]playerFrame{},
+		sids:         map[uint64]string{},
+		frameSeen:    map[string]bool{},
+		fovSeen:      map[[2]string]bool{},
 		lastShot:     map[string]shotMark{},
 		victimHealth: map[string]int{},
 		lastMoveTick: map[string]int{},
@@ -344,6 +363,7 @@ func (s *state) finalize() {
 
 	s.resolveHits()
 	s.closeAllSmokeVoxels(s.maxTick)
+	s.collectSmokeVoxels()
 	s.sortSmokeVoxels()
 	fmt.Fprintf(
 		os.Stderr,
@@ -439,15 +459,44 @@ func (s *state) captureMatchMeta() {
 	}
 }
 
+type meshLoad struct {
+	mesh *geometry.Mesh
+	err  error
+}
+
+// prefetchMesh starts loading the map's collision mesh in the background as
+// soon as the demo names its map. Loading is a download plus a BVH build over
+// half a million triangles, and nothing needs the result until the first
+// sightline, which is minutes of demo away.
+func (s *state) prefetchMesh(name string) {
+	if s.meshTried || s.meshFetch != nil || name == "" {
+		return
+	}
+	ch := make(chan meshLoad, 1)
+	s.meshFetch, s.meshFetchMap = ch, name
+	go func() {
+		mesh, err := geometry.Load(name)
+		ch <- meshLoad{mesh: mesh, err: err}
+	}()
+}
+
 // ensureMesh lazy-loads the map collision mesh once the map name is known,
 // memoizing the attempt (including a nil result). It's a no-op until MapName
-// is set, so early callers retry on the next call.
+// is set, so early callers retry on the next call. A prefetch for the same map
+// is waited on rather than repeated.
 func (s *state) ensureMesh() {
 	if s.meshTried || s.res.MapName == "" {
 		return
 	}
 	s.meshTried = true
-	mesh, err := geometry.Load(s.res.MapName)
+	var mesh *geometry.Mesh
+	var err error
+	if s.meshFetch != nil && s.meshFetchMap == s.res.MapName {
+		got := <-s.meshFetch
+		mesh, err = got.mesh, got.err
+	} else {
+		mesh, err = geometry.Load(s.res.MapName)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[geometry] mesh load failed for %s: %v\n", s.res.MapName, err)
 	}

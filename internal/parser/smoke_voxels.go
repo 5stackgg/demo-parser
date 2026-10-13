@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"runtime"
 	"sort"
 
 	"github.com/golang/geo/r3"
@@ -553,13 +555,51 @@ func (s *state) closeSmokeVoxels(entID, endTick int) {
 		return
 	}
 	delete(s.voxelTracks, entID)
-	out, ok := t.export(endTick, s.tickRate)
-	if !ok {
-		s.voxelSkipped++
-		return
+	// Replaying a cloud is tens of milliseconds of simulation that nothing
+	// reads until finalize, and a match throws a hundred of them, so it runs
+	// beside the parse rather than in it. The track is no longer reachable
+	// from the parse once it is out of voxelTracks, so the replay owns it.
+	job := &voxelExport{done: make(chan struct{})}
+	s.voxelJobs = append(s.voxelJobs, job)
+	rate := s.tickRate
+	voxelReplaySlots <- struct{}{}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[smoke-voxels] replay of grenade %d panicked: %v\n", t.gid, r)
+				job.ok = false
+			}
+			<-voxelReplaySlots
+			close(job.done)
+		}()
+		job.out, job.ok = t.export(endTick, rate)
+	}()
+}
+
+// voxelExport is one cloud being replayed off the parse goroutine.
+type voxelExport struct {
+	done chan struct{}
+	out  EventSmokeVoxels
+	ok   bool
+}
+
+// voxelReplaySlots bounds the replays in flight across every parse in the
+// process, since each holds a couple of MB of simulation state.
+var voxelReplaySlots = make(chan struct{}, runtime.GOMAXPROCS(0))
+
+// collectSmokeVoxels waits for every replay started so far and appends the
+// clouds in the order their logs closed.
+func (s *state) collectSmokeVoxels() {
+	for _, job := range s.voxelJobs {
+		<-job.done
+		if !job.ok {
+			s.voxelSkipped++
+			continue
+		}
+		s.res.SmokeVoxels = append(s.res.SmokeVoxels, job.out)
+		s.voxelBoxCells += job.out.DimX * job.out.DimY * job.out.DimZ
 	}
-	s.res.SmokeVoxels = append(s.res.SmokeVoxels, out)
-	s.voxelBoxCells += out.DimX * out.DimY * out.DimZ
+	s.voxelJobs = nil
 }
 
 // closeAllSmokeVoxels flushes every log still open, at a round transition or
@@ -571,7 +611,7 @@ func (s *state) closeAllSmokeVoxels(tick int) {
 }
 
 // sortSmokeVoxels puts the clouds in detonation order. They are appended as
-// they close, which is expiry order.
+// they close, which is expiry order. Call collectSmokeVoxels first.
 func (s *state) sortSmokeVoxels() {
 	sort.SliceStable(s.res.SmokeVoxels, func(i, j int) bool {
 		a, b := s.res.SmokeVoxels[i], s.res.SmokeVoxels[j]

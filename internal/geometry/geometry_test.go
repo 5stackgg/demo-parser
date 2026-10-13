@@ -158,8 +158,8 @@ func TestTriangleStaysSmall(t *testing.T) {
 	}
 }
 
-// spreadOn builds n triangles strung out along one axis, so the median split
-// picks that axis and exercises that axis's comparator.
+// spreadOn builds n triangles strung out along one axis, so every split the
+// build prices on that axis is the one it takes.
 func spreadOn(axis, n int) *Mesh {
 	verts := make([][3]r3.Vector, 0, n)
 	for i := 0; i < n; i++ {
@@ -180,53 +180,154 @@ func spreadOn(axis, n int) *Mesh {
 }
 
 func TestBVHDoesNotOverReserve(t *testing.T) {
-	// Every axis: the split has one comparator per axis, and a copy-paste slip
-	// in one of them yields a valid but badly split tree — no test would fail,
-	// the ray queries would just quietly get slower. Triangle counts are chosen
-	// to straddle the node-count ratio, which peaks at 4/5 near n = 5·2^k.
 	for _, n := range []int{4000, 5120, 10240, 20480} {
 		for axis := 0; axis < 3; axis++ {
 			m := spreadOn(axis, n)
+			if len(m.nodes) == 0 {
+				t.Fatalf("n=%d axis=%d: no BVH was built", n, axis)
+			}
 			if slack := cap(m.nodes) - len(m.nodes); slack > len(m.nodes)/8 {
 				t.Errorf("n=%d axis=%d: %d nodes in a slice of cap %d — %d wasted",
 					n, axis, len(m.nodes), cap(m.nodes), slack)
 			}
-			// The reservation must never have had to grow mid-build.
-			if len(m.nodes) > len(m.tris)*4/5+1 {
-				t.Errorf("n=%d axis=%d: %d nodes exceeds the 4/5 reservation for %d triangles",
-					n, axis, len(m.nodes), len(m.tris))
-			}
-			if len(m.nodes) == 0 {
-				t.Fatalf("n=%d axis=%d: no BVH was built", n, axis)
+			// A binary tree over n triangles has at most 2n-1 nodes; more means
+			// the build is emitting empty ones.
+			if len(m.nodes) > 2*len(m.tris)-1 {
+				t.Errorf("n=%d axis=%d: %d nodes for %d triangles", n, axis, len(m.nodes), len(m.tris))
 			}
 		}
 	}
 }
 
-// The median split must actually partition on each axis, not just compile. A
-// comparator reading the wrong field still builds a correct tree, so this
-// checks the tree is *tight*: a well-split run of triangles gives leaves whose
-// boxes are small along the spread axis.
+// The node layout is what keeps a ray's walk down the tree in cache; a field
+// creeping back to float64 would quietly undo that.
+func TestBVHNodeStaysSmall(t *testing.T) {
+	if got := unsafe.Sizeof(bvhNode{}); got != 32 {
+		t.Fatalf("bvhNode is %d bytes, want 32", got)
+	}
+}
+
+// The split must actually partition on each axis, not just compile. A split
+// reading the wrong axis still builds a correct tree, so this checks the tree
+// is *tight*: a well-split run of triangles gives leaves whose boxes are small
+// along the spread axis.
 func TestSplitPartitionsOnEachAxis(t *testing.T) {
 	const n = 4096
 	for axis := 0; axis < 3; axis++ {
 		m := spreadOn(axis, n)
 		widest := 0.0
+		leaves := 0
 		for i := range m.nodes {
-			if m.nodes[i].left >= 0 {
-				continue // internal
+			nd := &m.nodes[i]
+			if !nd.leaf() {
+				continue
 			}
-			e := m.nodes[i].max.Sub(m.nodes[i].min)
-			w := []float64{e.X, e.Y, e.Z}[axis]
-			if w > widest {
+			leaves++
+			if w := float64(nd.max[axis]) - float64(nd.min[axis]); w > widest {
 				widest = w
 			}
 		}
-		// Leaves hold ~4 of n triangles spaced one unit apart, so a leaf that
-		// split on the right axis spans a handful of units, not the full range.
-		if widest > 16 {
+		// Leaves hold a handful of n triangles spaced one unit apart, so a leaf
+		// that split on the right axis spans a handful of units, not the full
+		// range.
+		if widest > 32 {
 			t.Errorf("axis=%d: widest leaf spans %.0f units of a %d-unit range — "+
 				"the split is not partitioning on this axis", axis, widest, n)
+		}
+		if leaves < n/bvhMaxLeaf {
+			t.Errorf("axis=%d: %d leaves for %d triangles", axis, leaves, n)
+		}
+	}
+}
+
+// Every triangle must land in exactly one leaf, and every leaf's box must
+// contain its triangles: the build reorders m.tris in place, and a slip in that
+// permutation loses geometry without failing any query that misses it.
+func TestBVHLeavesCoverEveryTriangleOnce(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	var verts [][3]r3.Vector
+	for i := 0; i < 5000; i++ {
+		c := r3.Vector{X: rng.Float64() * 4000, Y: rng.Float64() * 4000, Z: rng.Float64() * 400}
+		p := func() r3.Vector {
+			return c.Add(r3.Vector{X: rng.Float64() * 64, Y: rng.Float64() * 64, Z: rng.Float64() * 64})
+		}
+		verts = append(verts, [3]r3.Vector{p(), p(), p()})
+	}
+	m := meshFromTris(verts...)
+	want := map[triangle]int{}
+	for _, v := range verts {
+		want[newTriangle(v[0], v[1], v[2])]++
+	}
+	seen := make([]int, len(m.tris))
+	for i := range m.nodes {
+		nd := &m.nodes[i]
+		if !nd.leaf() {
+			continue
+		}
+		for j := int(nd.index); j < int(nd.index)+nd.count(); j++ {
+			seen[j]++
+			tr := m.tris[j]
+			for _, v := range []vec3{tr.v0, tr.v1, tr.v2} {
+				for a := 0; a < 3; a++ {
+					if v.axis(a) < nd.min[a] || v.axis(a) > nd.max[a] {
+						t.Fatalf("leaf %d does not contain triangle %d", i, j)
+					}
+				}
+			}
+		}
+	}
+	for j, c := range seen {
+		if c != 1 {
+			t.Fatalf("triangle %d is in %d leaves", j, c)
+		}
+	}
+	for _, tr := range m.tris {
+		want[tr]--
+	}
+	for tr, c := range want {
+		if c != 0 {
+			t.Fatalf("triangle %+v count off by %d after the reorder", tr, c)
+		}
+	}
+}
+
+// The tree is only a speedup: every query must answer exactly what testing
+// every triangle would.
+func TestBVHAgreesWithBruteForce(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	var verts [][3]r3.Vector
+	for i := 0; i < 3000; i++ {
+		c := r3.Vector{X: rng.Float64() * 2000, Y: rng.Float64() * 2000, Z: rng.Float64() * 300}
+		p := func() r3.Vector {
+			return c.Add(r3.Vector{X: rng.Float64() * 96, Y: rng.Float64() * 96, Z: rng.Float64() * 96})
+		}
+		verts = append(verts, [3]r3.Vector{p(), p(), p()})
+	}
+	m := meshFromTris(verts...)
+	for q := 0; q < 4000; q++ {
+		a := r3.Vector{X: rng.Float64() * 2000, Y: rng.Float64() * 2000, Z: rng.Float64() * 300}
+		b := r3.Vector{X: rng.Float64() * 2000, Y: rng.Float64() * 2000, Z: rng.Float64() * 300}
+		dir := b.Sub(a)
+		segLen := dir.Norm()
+		epsT := math.Min(endEps/segLen, 0.45)
+		brute := false
+		bestT := math.Inf(1)
+		// Normalised the way RayHitDist does it, so the two agree to the bit.
+		unit := r3.Vector{X: dir.X / segLen, Y: dir.Y / segLen, Z: dir.Z / segLen}
+		for i := range m.tris {
+			if tt, ok := rayTriangle(a, dir, &m.tris[i]); ok && tt > epsT && tt < 1-epsT {
+				brute = true
+			}
+			if tt, ok := rayTriangle(a, unit, &m.tris[i]); ok && tt > 1e-4 && tt < bestT {
+				bestT = tt
+			}
+		}
+		if got := m.Occluded(a, b); got != brute {
+			t.Fatalf("query %d: Occluded=%v, brute force says %v", q, got, brute)
+		}
+		d, ok := m.RayHitDist(a, dir)
+		if ok != !math.IsInf(bestT, 1) || (ok && d != bestT) {
+			t.Fatalf("query %d: RayHitDist=(%v,%v), brute force says %v", q, d, ok, bestT)
 		}
 	}
 }
