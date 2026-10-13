@@ -10,12 +10,20 @@ Please visit [5Stack](https://docs.5stack.gg) for more documentation.
 
 | Endpoint | Body | Answers |
 | --- | --- | --- |
-| `POST /parse` | `{"demo_url": "..."}` | parsed `Result` JSON |
+| `POST /parse` | `{"demo_url": "...", "playback": {...}}` | parsed `Result` JSON, with the playback blob when asked |
 | `POST /smoke-voxels` | `{"log","samples","detonation","tick_rate"}` | a smoke rebuilt from its live voxel log |
 | `POST /smoke-volume` | `{"map","x","y","z"}` | the bloom at a point |
 | `POST /sightlines` | map + smoke(s) + eye-position pairs | what the smoke blocks |
 | `POST /oneway` | map + smoke(s) + player-position pairs | asymmetric visibility |
 | `POST /drift` | map + two mesh revisions + lineups | which lineups a map update moved |
+
+`playback` (`{"match_map_id": "...", "schema_version": 11}`) asks `/parse` to
+build the demo's gzipped playback blob too, the document the 2D/3D replay
+reads. It comes back base64 as `playback.blob` with its counts, and the result
+leaves out what only the blob needs (`positions`, `grenade_trajectories`,
+`smoke_volumes`, `smoke_voxels`, `infernos`, `kit_drops`) — ~95% of a parse.
+A `schema_version` this parser does not build is ignored and the full result
+returned, so the api can build the blob itself.
 
 The last four answer questions about a **map**, not a demo, so they work for a
 lineup nobody has ever thrown. They need the map's collision mesh and return
