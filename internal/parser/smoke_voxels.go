@@ -308,7 +308,8 @@ func (l *voxelLog) cloud(det r3.Vector, tickRate float64) []int {
 		if !l.advance(sim, n) {
 			break
 		}
-		for m := range reached {
+		// Only a reached voxel holds density, so only those can have filled.
+		for _, m := range sim.active {
 			if reached[m] < 0 && sim.cell[sim.cur][m].density > smokeVisible {
 				reached[m] = tick
 			}

@@ -1,6 +1,9 @@
 package parser
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // The game does not network a smoke's cloud; it networks what its own
 // simulation starts from — the emitter voxels and the world geometry around
@@ -65,14 +68,23 @@ func init() {
 	}
 }
 
-// interleave3 is deinterleave3's inverse over the voxel grid.
+// interleave3 is deinterleave3's inverse over the voxel grid. The flow asks
+// it for six neighbours of every voxel every step, so the bit spreading is a
+// table rather than a loop.
 func interleave3(x, y, z int) int {
-	m := 0
-	for b := 0; b < 5; b++ {
-		m |= (x>>b&1)<<(3*b) | (y>>b&1)<<(3*b+1) | (z>>b&1)<<(3*b+2)
-	}
-	return m
+	return mortonSpread[x&31] | mortonSpread[y&31]<<1 | mortonSpread[z&31]<<2
 }
+
+// mortonSpread[v] is v's five bits moved three apart: v's lane of a Morton
+// code.
+var mortonSpread = func() (t [32]int) {
+	for v := range t {
+		for b := 0; b < 5; b++ {
+			t[v] |= (v >> b & 1) << (3 * b)
+		}
+	}
+	return t
+}()
 
 type simCell struct {
 	density float32
@@ -92,9 +104,17 @@ type smokeSim struct {
 	solid  [voxelCells]bool
 	// reached and cell are double-buffered the way the game's are: a step
 	// reads cur and writes the other, then they swap.
-	reached  [2][voxelCells]bool
-	cell     [2][voxelCells]simCell
-	cur      int
+	reached [2][voxelCells]bool
+	cell    [2][voxelCells]simCell
+	cur     int
+	// active is every voxel reached before this step, ascending — the voxels
+	// the step's passes visit, in the order they visited them when they
+	// walked the whole grid. A cloud reaches a few thousand of the 32768, and
+	// nothing else holds any density to move. emitted and woke are the voxels
+	// reached during this step, by emission and by flow, until they join it.
+	active   []uint16
+	emitted  []uint16
+	woke     []uint16
 	emitters []simEmitter
 	// started is false until the first step, which is the burst.
 	started bool
@@ -142,21 +162,58 @@ func (s *smokeSim) at(x, y, z int) (m int, ok bool) {
 func (s *smokeSim) step() {
 	s.emit()
 	cur, oth := s.cur, 1-s.cur
-	for m := 0; m < voxelCells; m++ {
-		if s.reached[cur][m] {
-			s.flow(m)
-		}
+	// Emission reached these in cur, so the flow visits them this step.
+	s.active = mergeSorted(s.active, s.emitted)
+	for _, m := range s.active {
+		s.flow(int(m))
 	}
-	for m := 0; m < voxelCells; m++ {
-		if s.reached[cur][m] {
-			s.cell[cur][m] = s.cell[oth][m]
-		}
+	for _, m := range s.active {
+		s.cell[cur][m] = s.cell[oth][m]
 	}
-	for m := 0; m < voxelCells; m++ {
-		r := s.reached[cur][m] || s.reached[oth][m]
-		s.reached[cur][m], s.reached[oth][m] = r, r
+	// Both buffers end the step reached wherever either was: emission marked
+	// cur, the flow marked oth.
+	for _, m := range s.emitted {
+		s.reached[oth][m] = true
 	}
+	for _, m := range s.woke {
+		s.reached[cur][m] = true
+	}
+	s.active = mergeSorted(s.active, s.woke)
+	s.emitted, s.woke = s.emitted[:0], s.woke[:0]
 	s.cur = oth
+}
+
+// reach marks voxel m reached in buffer b, noting it in list the first time
+// it is reached at all. A voxel neither buffer has reached is one neither the
+// last step nor this one has touched yet.
+func (s *smokeSim) reach(b, m int, list *[]uint16) {
+	if !s.reached[0][m] && !s.reached[1][m] {
+		*list = append(*list, uint16(m))
+	}
+	s.reached[b][m] = true
+}
+
+// mergeSorted adds add, in any order and with no voxel already in into, to the
+// ascending into.
+func mergeSorted(into, add []uint16) []uint16 {
+	if len(add) == 0 {
+		return into
+	}
+	slices.Sort(add)
+	n := len(into)
+	into = slices.Grow(into, len(add))[:n+len(add)]
+	i, j, k := n-1, len(add)-1, len(into)-1
+	for j >= 0 {
+		if i >= 0 && into[i] > add[j] {
+			into[k] = into[i]
+			i--
+		} else {
+			into[k] = add[j]
+			j--
+		}
+		k--
+	}
+	return into
 }
 
 // simAround are a voxel's 26 neighbours in the order the game visits them.
@@ -187,9 +244,9 @@ func (s *smokeSim) burst() {
 			density := float32(simEmitRate*simBurstShare) + s.cell[cur][n].density
 			s.cell[cur][n].density = density
 			s.cell[oth][n].density = density
-			s.reached[cur][n] = true
+			s.reach(cur, n, &s.emitted)
 		}
-		s.reached[cur][interleave3(e.x, e.y, e.z)] = true
+		s.reach(cur, interleave3(e.x, e.y, e.z), &s.emitted)
 	}
 }
 
@@ -243,7 +300,7 @@ func (s *smokeSim) emit() {
 			density = most
 		}
 		c.density = density
-		s.reached[cur][m] = true
+		s.reach(cur, m, &s.emitted)
 		s.cell[oth][m] = *c
 	}
 }
@@ -310,7 +367,7 @@ func (s *smokeSim) flow(m int) {
 		}
 		s.cell[oth][n].density = left
 		if !s.reached[cur][n] && held > simWake {
-			s.reached[oth][n] = true
+			s.reach(oth, n, &s.woke)
 		}
 	}
 
