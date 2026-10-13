@@ -30,6 +30,7 @@ func (s *state) onServerInfo(m *msg.CSVCMsg_ServerInfo) {
 	if mm := workshopMapRe.FindStringSubmatch(name); len(mm) == 2 {
 		s.res.WorkshopID = mm[1]
 	}
+	s.prefetchMesh(name)
 }
 
 // The demo's userinfo string-table is the authoritative source for

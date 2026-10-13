@@ -240,3 +240,13 @@ func TestTheSimulationIsDeterministic(t *testing.T) {
 		t.Fatal("two runs from the same start ended differently")
 	}
 }
+
+// The table must spread bits exactly as the game's loop does, for every voxel.
+func TestInterleave3RoundTrips(t *testing.T) {
+	for m := 0; m < voxelCells; m++ {
+		x, y, z := deinterleave3(m, 5)
+		if got := interleave3(x, y, z); got != m {
+			t.Fatalf("interleave3(%d, %d, %d) = %d, want %d", x, y, z, got, m)
+		}
+	}
+}

@@ -29,7 +29,7 @@ func newVec3(v r3.Vector) vec3 {
 
 // triangle carries only what rayTriangle reads. Bounds and centroids are
 // needed just once, while the BVH is being built, and are cheap to recover
-// from the corners (see triBounds and the split in bvh.go) — storing them would
+// from the corners (see build in bvh.go) — storing them would
 // quadruple the resident size of every mesh for the life of the process.
 //
 // The corners are stored rather than the Möller–Trumbore edges, even though
@@ -209,5 +209,8 @@ func (m *Mesh) Bounds() (min, max r3.Vector, ok bool) {
 	if m == nil || len(m.nodes) == 0 {
 		return r3.Vector{}, r3.Vector{}, false
 	}
-	return m.nodes[0].min, m.nodes[0].max, true
+	n := &m.nodes[0]
+	return r3.Vector{X: float64(n.min[0]), Y: float64(n.min[1]), Z: float64(n.min[2])},
+		r3.Vector{X: float64(n.max[0]), Y: float64(n.max[1]), Z: float64(n.max[2])},
+		true
 }

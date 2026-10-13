@@ -4,9 +4,137 @@ import (
 	"math"
 	"sort"
 
+	"github.com/golang/geo/r3"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/constants"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+	st "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/sendtables"
 )
+
+// tickPlayer is one playing player as the current frame left them, read off
+// the entities once and shared by everything onFrameDone drives. Every
+// accessor on common.Player resolves the pawn and looks its properties up by
+// name, so reading each player once per consumer — the frame sample, the FOV
+// pass, the position ring — cost more than the work done with the values.
+type tickPlayer struct {
+	p *common.Player
+	// pawn is p.PlayerPawnEntity(), resolved once; nil when the player has
+	// none, which every read below treats the way common.Player does.
+	pawn   st.Entity
+	sid    string
+	team   common.Team
+	health int
+	alive  bool
+	pos    r3.Vector
+	yaw    float32
+	pitch  float32
+	// eye and blind are read only for living players; nothing asks them of the
+	// dead.
+	eye   r3.Vector
+	blind float64
+}
+
+// snapshotPlayers fills s.framePlayers with every playing player that has a
+// SteamID, in Participants().Playing() order — the order each consumer used
+// to walk.
+//
+// The reads are common.Player's own (Health, IsAlive, Position, PositionEyes,
+// ViewDirectionX/Y), spelled out against the pawn resolved once: resolving it
+// is two property lookups and an entity lookup, and each accessor paid that
+// again, five times a player a frame. PositionEyes re-read the position
+// Position had just read.
+func (s *state) snapshotPlayers() {
+	s.framePlayers = s.framePlayers[:0]
+	for _, p := range s.parser.GameState().Participants().Playing() {
+		if p == nil {
+			continue
+		}
+		sid := s.steamID(p)
+		if sid == "" {
+			continue
+		}
+		pawn := p.PlayerPawnEntity()
+		tp := tickPlayer{p: p, pawn: pawn, sid: sid, team: p.Team}
+		if pawn != nil {
+			tp.health = pawn.PropertyValueMust("m_iHealth").Int()
+			tp.pos = pawn.Position()
+			ang := pawn.PropertyValueMust("m_angEyeAngles").R3Vec()
+			tp.yaw, tp.pitch = float32(ang.Y), float32(ang.X)
+		}
+		switch {
+		case tp.health > 0:
+			tp.alive = true
+		case pawn != nil:
+			tp.alive = pawn.PropertyValueMust("m_lifeState").UInt64() == 0
+		case p.Entity != nil:
+			tp.alive = p.Entity.PropertyValueMust("m_bPawnIsAlive").BoolVal()
+		}
+		if tp.alive {
+			tp.eye = eyePosition(pawn, tp.pos)
+			tp.blind = p.FlashDurationTimeRemaining().Seconds()
+		}
+		s.framePlayers = append(s.framePlayers, tp)
+	}
+}
+
+// eyePosition is common.Player.PositionEyes given the pawn and its position:
+// the position plus the pawn's eye offset, or the position alone when the
+// demo does not network the offset.
+func eyePosition(pawn st.Entity, pos r3.Vector) r3.Vector {
+	if pawn == nil {
+		return r3.Vector{}
+	}
+	var off [3]float32
+	for i, name := range [3]string{"m_vecX", "m_vecY", "m_vecZ"} {
+		v, ok := pawn.PropertyValue(name)
+		if !ok || v.Any == nil {
+			return pos
+		}
+		f, ok := v.Any.(float32)
+		if !ok {
+			return pos
+		}
+		off[i] = f
+	}
+	return pos.Add(r3.Vector{X: float64(off[0]), Y: float64(off[1]), Z: float64(off[2])})
+}
+
+// pawnInt, pawnBool and pawnUint read a pawn property the way common.Player's
+// accessors do, zero for a player without a pawn.
+func pawnInt(pawn st.Entity, name string) int {
+	if pawn == nil {
+		return 0
+	}
+	return pawn.PropertyValueMust(name).Int()
+}
+
+func pawnBool(pawn st.Entity, name string) bool {
+	if pawn == nil {
+		return false
+	}
+	return pawn.PropertyValueMust(name).BoolVal()
+}
+
+func pawnUint(pawn st.Entity, name string) uint64 {
+	if pawn == nil {
+		return 0
+	}
+	return pawn.PropertyValueMust(name).UInt64()
+}
+
+// steamID is steamIDStr without formatting the same handful of IDs every
+// frame.
+func (s *state) steamID(p *common.Player) string {
+	if p == nil || p.SteamID64 == 0 {
+		return ""
+	}
+	sid, ok := s.sids[p.SteamID64]
+	if !ok {
+		sid = steamIDStr(p)
+		s.sids[p.SteamID64] = sid
+	}
+	return sid
+}
 
 // onFrameDone samples per-player position/velocity each tick. Used by
 // WeaponFire to annotate shots with speed + counter-strafe state.
@@ -18,17 +146,16 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 	s.tickRate = tickRate
 	s.resolveHits()
 	curTick := s.parser.GameState().IngameTick()
-	seen := map[string]bool{}
-	for _, p := range s.parser.GameState().Participants().Playing() {
-		if p == nil || !p.IsAlive() {
+	s.snapshotPlayers()
+	clear(s.frameSeen)
+	for i := range s.framePlayers {
+		tp := &s.framePlayers[i]
+		if !tp.alive {
 			continue
 		}
-		sid := steamIDStr(p)
-		if sid == "" {
-			continue
-		}
-		seen[sid] = true
-		pos := p.Position()
+		sid := tp.sid
+		s.frameSeen[sid] = true
+		pos := tp.pos
 		prev, hadPrev := s.frames[sid]
 		var (
 			speed    float32
@@ -43,26 +170,25 @@ func (s *state) onFrameDone(_ events.FrameDone) {
 				hasSpeed = true
 			}
 		}
-		eye, _ := p.PositionEyes()
 		s.frames[sid] = playerFrame{
 			pos:            pos,
 			speed:          speed,
 			hasSpeed:       hasSpeed,
-			team:           p.Team,
+			team:           tp.team,
 			alive:          true,
 			tick:           curTick,
-			yaw:            p.ViewDirectionX(),
-			pitch:          p.ViewDirectionY(),
-			eye:            eye,
-			blindRemaining: p.FlashDurationTimeRemaining().Seconds(),
+			yaw:            tp.yaw,
+			pitch:          tp.pitch,
+			eye:            tp.eye,
+			blindRemaining: tp.blind,
 		}
-		s.recordEye(sid, curTick, eye)
+		s.recordEye(sid, curTick, tp.eye)
 		if hasSpeed && speed > 100 {
 			s.lastMoveTick[sid] = curTick
 		}
 	}
 	for sid, f := range s.frames {
-		if !seen[sid] && f.alive {
+		if !s.frameSeen[sid] && f.alive {
 			f.alive = false
 			s.frames[sid] = f
 		}
@@ -156,35 +282,33 @@ func (s *state) capturePositions(tick int) *positionSample {
 	// SteamID is the only identity that survives reliably.
 	var carrierSID string
 	if b := s.parser.GameState().Bomb(); b != nil && b.Carrier != nil {
-		carrierSID = steamIDStr(b.Carrier)
+		carrierSID = s.steamID(b.Carrier)
 	}
-	for _, p := range s.parser.GameState().Participants().Playing() {
-		if p == nil {
-			continue
-		}
-		sid := steamIDStr(p)
-		if sid == "" {
-			continue
-		}
-		pos := p.Position()
+	weapons := s.parser.GameState().Weapons()
+	for i := range s.framePlayers {
+		tp := &s.framePlayers[i]
+		pawn := tp.pawn
+		// common.Player.ActiveWeapon, against the pawn already resolved. Named
+		// as kills and shots name it, so the web icon map resolves it directly.
+		weapon := weapons[int(pawnUint(pawn, "m_pWeaponServices.m_hActiveWeapon")&constants.EntityHandleIndexMaskSource2)]
 		slot.rows = append(slot.rows, EventPosition{
 			Tick:            tick,
 			Round:           s.currentRound,
-			AttackerSteamID: sid,
-			Team:            teamCode(p.Team),
-			Alive:           p.IsAlive(),
-			X:               float32(pos.X),
-			Y:               float32(pos.Y),
-			Z:               float32(pos.Z),
-			Yaw:             p.ViewDirectionX(),
-			Pitch:           p.ViewDirectionY(),
-			Health:          p.Health(),
-			Armor:           p.Armor(),
-			HasHelmet:       p.HasHelmet(),
-			HasBomb:         carrierSID != "" && sid == carrierSID,
-			HasDefuser:      p.Team == common.TeamCounterTerrorists && p.HasDefuseKit(),
-			ActiveWeapon:    activeWeaponName(p),
-			Ducked:          p.IsDucking(),
+			AttackerSteamID: tp.sid,
+			Team:            teamCode(tp.team),
+			Alive:           tp.alive,
+			X:               float32(tp.pos.X),
+			Y:               float32(tp.pos.Y),
+			Z:               float32(tp.pos.Z),
+			Yaw:             tp.yaw,
+			Pitch:           tp.pitch,
+			Health:          tp.health,
+			Armor:           pawnInt(pawn, "m_ArmorValue"),
+			HasHelmet:       pawnBool(pawn, "m_pItemServices.m_bHasHelmet"),
+			HasBomb:         carrierSID != "" && tp.sid == carrierSID,
+			HasDefuser:      tp.team == common.TeamCounterTerrorists && pawnBool(pawn, "m_pItemServices.m_bHasDefuser"),
+			ActiveWeapon:    weaponCanonical(weapon),
+			Ducked:          common.PlayerFlags(pawnUint(pawn, "m_fFlags")).Ducking(),
 		})
 	}
 	return slot

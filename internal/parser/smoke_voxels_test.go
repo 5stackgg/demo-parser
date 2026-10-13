@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/golang/geo/r3"
@@ -471,5 +472,45 @@ func TestExportVoxelsEmpty(t *testing.T) {
 	}
 	if _, ok := exportVoxels(arrival, r3.Vector{X: 1}, 64); ok {
 		t.Fatal("an empty cloud should not export")
+	}
+}
+
+// Closing a log hands its replay to a goroutine; what finalize collects must be
+// exactly what replaying it in place would have produced, for every cloud.
+func TestClosedLogsReplayOffTheParse(t *testing.T) {
+	files := []string{
+		"smoke_voxels_inferno_4019.bin",
+		"smoke_voxels_inferno_12642.bin",
+		"smoke_voxels_inferno_14690.bin",
+	}
+	track := func(i int, buf []byte) *smokeVoxelTrack {
+		tr := &smokeVoxelTrack{gid: i + 1, round: 3, startTick: 1000 * (i + 1), log: newVoxelLog()}
+		tr.det = r3.Vector{X: 100 * float64(i+1), Y: 50, Z: 10}
+		tr.log.read(buf, 0)
+		return tr
+	}
+	s := &state{res: &Result{}, tickRate: 64, voxelTracks: map[int]*smokeVoxelTrack{}}
+	var want []EventSmokeVoxels
+	for i, f := range files {
+		buf := readVoxelDump(t, f)
+		end := 1000*(i+1) + 300
+		out, ok := track(i, buf).export(end, 64)
+		if !ok {
+			t.Fatalf("%s: nothing to replay", f)
+		}
+		want = append(want, out)
+		s.voxelTracks[i] = track(i, buf)
+		s.closeSmokeVoxels(i, end)
+	}
+	if len(s.voxelTracks) != 0 {
+		t.Fatalf("%d logs still open after closing them all", len(s.voxelTracks))
+	}
+	s.collectSmokeVoxels()
+	s.sortSmokeVoxels()
+	if !reflect.DeepEqual(s.res.SmokeVoxels, want) {
+		t.Fatalf("collected clouds differ from replaying them in place")
+	}
+	if s.voxelSkipped != 0 {
+		t.Errorf("%d clouds skipped", s.voxelSkipped)
 	}
 }
