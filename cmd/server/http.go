@@ -3,19 +3,20 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/bzip2"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"sync"
+	"runtime"
 	"time"
 
 	"github.com/5stackgg/demo-parser/internal/parser"
+	"github.com/cosnicolaou/pbzip2"
 )
 
 type parseRequest struct {
@@ -77,59 +78,85 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 		logPrefix = "<no-id>"
 	}
 
-	f, err := downloadDemo(req.DemoURL, logPrefix)
+	start := time.Now()
+	result, t, err := fetchAndParse(req.DemoURL, logPrefix)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		var pe parseError
+		if errors.As(err, &pe) {
+			status = http.StatusUnprocessableEntity
+		}
+		log.Printf("[%s] failed after %s: %v", logPrefix, time.Since(start), err)
+		http.Error(w, err.Error(), status)
 		return
 	}
-	defer func() {
-		name := f.Name()
-		_ = f.Close()
-		_ = os.Remove(name)
-	}()
 
-	body, err := sniffDemoStream(f, logPrefix)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
+	respondStart := time.Now()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	cw := &countingWriter{w: w}
+	if err := json.NewEncoder(cw).Encode(result); err != nil {
+		log.Printf("[%s] response encode: %v", logPrefix, err)
 	}
-	log.Printf("[%s] parsing demo", logPrefix)
-	parseAndRespond(w, body, logPrefix)
+	// One line with the whole request, so a slow import can be read off the
+	// parser's log without adding up the lines above it. Download and parse
+	// overlap: the parse starts on the first bytes and follows the download.
+	log.Printf(
+		"[%s] done in %s: download %s (%d bytes), parse %s, respond %s (%d bytes)%s",
+		logPrefix, time.Since(start).Round(time.Millisecond),
+		t.download.Round(time.Millisecond), t.size, t.parse.Round(time.Millisecond),
+		time.Since(respondStart).Round(time.Millisecond), cw.n, t.attemptsNote(),
+	)
 }
 
-var demoClient = &http.Client{Timeout: 5 * time.Minute}
+// parseError is a demo that downloaded but would not parse: a CDN error page,
+// a corrupt file. Retrying the download would only fetch it again.
+type parseError struct{ err error }
+
+func (e parseError) Error() string { return e.err.Error() }
+func (e parseError) Unwrap() error { return e.err }
+
+// parseTimings is what one request spent where, for the summary log line.
+type parseTimings struct {
+	download time.Duration
+	parse    time.Duration
+	size     int64
+	attempts int
+}
+
+func (t parseTimings) attemptsNote() string {
+	if t.attempts <= 1 {
+		return ""
+	}
+	return fmt.Sprintf(", %d attempts", t.attempts)
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
 
 const demoDownloadAttempts = 3
 
-// One in-flight download per CDN host. Valve's replay servers 502 under
-// concurrent load, so requests to the same replayNNN.valve.net host are
-// serialized while different hosts still download in parallel.
-var (
-	hostLocksMu sync.Mutex
-	hostLocks   = map[string]*sync.Mutex{}
-)
-
-func hostLock(host string) *sync.Mutex {
-	hostLocksMu.Lock()
-	defer hostLocksMu.Unlock()
-	l := hostLocks[host]
-	if l == nil {
-		l = &sync.Mutex{}
-		hostLocks[host] = l
-	}
-	return l
-}
-
-// Valve's replay CDN intermittently drops connections mid-stream and returns
-// transient 5xx, so retry those with backoff. 4xx (e.g. an expired demo) is
+// fetchAndParse downloads and parses a demo. Valve's replay CDN intermittently
+// drops connections mid-stream and returns transient 5xx, so a failed download
+// is retried with backoff — the parse with it, since the parse runs alongside
+// the download and has read what arrived. 4xx (e.g. an expired demo) is
 // permanent and returned immediately.
-func downloadDemo(url, logPrefix string) (*os.File, error) {
-	log.Printf("[%s] fetching demo %s", logPrefix, url)
+func fetchAndParse(demoURL, logPrefix string) (*parser.Result, parseTimings, error) {
+	log.Printf("[%s] fetching demo %s", logPrefix, demoURL)
 	var lastErr error
 	for attempt := 1; attempt <= demoDownloadAttempts; attempt++ {
-		f, retryable, err := downloadDemoOnce(url, logPrefix)
+		result, t, retryable, err := fetchAndParseOnce(demoURL, logPrefix)
+		t.attempts = attempt
 		if err == nil {
-			return f, nil
+			return result, t, nil
 		}
 		lastErr = err
 		if !retryable || attempt == demoDownloadAttempts {
@@ -140,53 +167,60 @@ func downloadDemo(url, logPrefix string) (*os.File, error) {
 			logPrefix, attempt, demoDownloadAttempts, err, backoff)
 		time.Sleep(backoff)
 	}
-	return nil, lastErr
+	return nil, parseTimings{}, lastErr
 }
 
-func downloadDemoOnce(demoURL, logPrefix string) (*os.File, bool, error) {
-	fetchStart := time.Now()
-
-	if u, err := url.Parse(demoURL); err == nil && u.Host != "" {
-		l := hostLock(u.Host)
-		l.Lock()
-		defer l.Unlock()
-	}
-
-	resp, err := demoClient.Get(demoURL)
+// fetchAndParseOnce parses the demo while it downloads. The parser treats a
+// read error as the end of the demo and returns what it had, so the download's
+// own outcome decides whether the result stands: a parse of a download that
+// broke off is a parse of a truncated demo, and is thrown away.
+func fetchAndParseOnce(demoURL, logPrefix string) (*parser.Result, parseTimings, bool, error) {
+	var t parseTimings
+	dl, retryable, err := startDownload(demoURL, logPrefix)
 	if err != nil {
-		return nil, true, fmt.Errorf("fetch demo: %v", err)
+		return nil, t, retryable, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		retryable := resp.StatusCode >= 500 || resp.StatusCode == 429
-		return nil, retryable, fmt.Errorf("fetch demo: upstream %d", resp.StatusCode)
+	defer dl.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	body, sniffErr := sniffDemoStream(ctx, dl.reader(), logPrefix)
+	if sniffErr != nil {
+		// Too short to sniff can be a download that broke off early.
+		if res := dl.wait(); res.err != nil {
+			return nil, t, res.retryable, res.err
+		}
+		return nil, t, false, parseError{sniffErr}
 	}
 
-	f, err := os.CreateTemp("", "demo-*.dem")
+	log.Printf("[%s] parsing demo", logPrefix)
+	parseStart := time.Now()
+	result, err := parser.Parse(body)
+	t.parse = time.Since(parseStart)
+
+	res := dl.wait()
+	t.download, t.size = res.elapsed, res.size
+	if res.err != nil {
+		return nil, t, res.retryable, res.err
+	}
 	if err != nil {
-		return nil, false, fmt.Errorf("create temp: %v", err)
+		log.Printf("[%s] parse error: %v", logPrefix, err)
+		return nil, t, false, parseError{fmt.Errorf("parse: %v", err)}
 	}
-
-	n, err := io.Copy(f, resp.Body)
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return nil, true, fmt.Errorf("download demo (after %d bytes): %w", n, err)
-	}
-	if want := resp.ContentLength; want > 0 && n != want {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return nil, true, fmt.Errorf("download truncated: got %d of %d bytes", n, want)
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return nil, false, fmt.Errorf("rewind temp: %v", err)
-	}
-
-	log.Printf("[%s] downloaded %d bytes in %s", logPrefix, n, time.Since(fetchStart))
-	return f, false, nil
+	log.Printf(
+		"[%s] parsed in %s: ticks=%d tick_rate=%.1f rounds=%d map=%s",
+		logPrefix, t.parse,
+		result.TotalTicks, result.TickRate, len(result.RoundTicks), result.MapName,
+	)
+	return result, t, false, nil
 }
+
+// bzip2Workers is how many blocks of a bzip2 demo decompress at once. Valve
+// serves its demos bzip2'd, and the standard library's single-threaded decoder
+// manages about 10 MB/s — slower than the parse it feeds, so it set the pace of
+// the whole parse. Four keep well ahead of the parser without taking the cores
+// it needs.
+var bzip2Workers = min(runtime.GOMAXPROCS(0), 4)
 
 // sniffDemoStream inspects the first 8 bytes to decide whether the
 // body is bzip2-compressed (Valve), gzip-compressed (FACEIT), a raw
@@ -194,8 +228,8 @@ func downloadDemoOnce(demoURL, logPrefix string) (*os.File, bool, error) {
 // a CDN when a demo has been tombstoned). For raw demos we accept
 // either HL2DEMO (legacy) or PBDEMS2 (CS2 source 2 protobuf). Anything
 // else returns an error with the magic bytes so the caller can see
-// what was actually served.
-func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
+// what was actually served. Cancelling ctx stops a bzip2 decoder's workers.
+func sniffDemoStream(ctx context.Context, body io.Reader, logPrefix string) (io.Reader, error) {
 	br := bufio.NewReader(body)
 	magic, err := br.Peek(8)
 	if err != nil && err != io.EOF {
@@ -205,7 +239,9 @@ func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
 		return nil, fmt.Errorf("demo too short (%d bytes)", len(magic))
 	}
 	if bytes.HasPrefix(magic, []byte("BZh")) {
-		return bzip2.NewReader(br), nil
+		return pbzip2.NewReader(ctx, br, pbzip2.DecompressionOptions(
+			pbzip2.BZConcurrency(bzip2Workers),
+		)), nil
 	}
 	if bytes.HasPrefix(magic, []byte{0x1f, 0x8b}) {
 		gz, err := gzip.NewReader(br)
@@ -220,25 +256,4 @@ func sniffDemoStream(body io.Reader, logPrefix string) (io.Reader, error) {
 	}
 	log.Printf("[%s] unrecognized demo magic: %q", logPrefix, magic)
 	return nil, fmt.Errorf("unrecognized demo content: %q", magic)
-}
-
-func parseAndRespond(w http.ResponseWriter, body io.Reader, logPrefix string) {
-	start := time.Now()
-	result, err := parser.Parse(body)
-	if err != nil {
-		log.Printf("[%s] parse error: %v", logPrefix, err)
-		http.Error(w, fmt.Sprintf("parse: %v", err), http.StatusUnprocessableEntity)
-		return
-	}
-	log.Printf(
-		"[%s] parsed in %s: ticks=%d tick_rate=%.1f rounds=%d map=%s",
-		logPrefix, time.Since(start),
-		result.TotalTicks, result.TickRate, len(result.RoundTicks), result.MapName,
-	)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		log.Printf("[%s] response encode: %v", logPrefix, err)
-	}
 }

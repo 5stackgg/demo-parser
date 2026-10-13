@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
+	github.com/cosnicolaou/pbzip2 v1.0.6
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/markus-wa/demoinfocs-golang/v5 v5.2.0
 	google.golang.org/protobuf v1.36.11
