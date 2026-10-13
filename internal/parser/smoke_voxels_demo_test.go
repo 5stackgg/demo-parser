@@ -94,11 +94,11 @@ func TestParseExportsSmokeVoxels(t *testing.T) {
 				first = min(first, int(b))
 			}
 		}
-		if filled < defaultVoxelFlood.budgetMin || filled > defaultVoxelFlood.budgetMax {
-			t.Errorf("smoke %d holds %d voxels, outside the fitted range", i, filled)
+		if filled < 400 || filled > 1600 {
+			t.Errorf("smoke %d holds %d voxels; a cloud is several hundred to a little over a thousand", i, filled)
 		}
 		if first != 0 {
-			t.Errorf("smoke %d first fills at %d, want 0 (its sources, on detonation)", i, first)
+			t.Errorf("smoke %d first fills at %d, want 0 (the burst, on detonation)", i, first)
 		}
 		t.Logf("smoke %d: gid=%d round=%d box %dx%dx%d at (%.0f,%.0f,%.0f), %d voxels, %d bytes, %d base64",
 			i, sv.GrenadeID, sv.Round, sv.DimX, sv.DimY, sv.DimZ, sv.OriginX, sv.OriginY, sv.OriginZ,
@@ -200,7 +200,7 @@ func TestReconstructSmokeVoxelsMatchesTheDemo(t *testing.T) {
 		t.Logf("smoke %d: %d bytes over %d samples, last at tick %d", want.StartTick, len(tr.buf), len(s), s[len(s)-1][1])
 
 		// The whole log on the detonation tick has the same shape; only the
-		// timing, which comes from when each brick arrived, can differ.
+		// timing, which comes from when each frame arrived, can differ.
 		at0, err := ReconstructSmokeVoxels(tr.buf, [][2]int{{len(tr.buf), 0}}, tr.det, res.TickRate)
 		if err != nil {
 			t.Fatal(err)
@@ -212,82 +212,7 @@ func TestReconstructSmokeVoxelsMatchesTheDemo(t *testing.T) {
 			timed++
 		}
 	}
-	// Where the server sends a brick before the step pace reaches it, its
-	// arrival changes nothing, so this holds for some smokes and not all.
 	if timed == 0 {
 		t.Error("no smoke's timing depends on its samples; the test would pass without them")
-	}
-}
-
-// TestSmokeVoxelCalibration is where defaultVoxelFlood's numbers come from.
-// It scores the reconstruction by the one ground truth the demo carries — the
-// bricks the server sent, which are the bricks its cloud occupied or bordered —
-// as intersection over union with the bricks ours occupies or borders.
-//
-// On test.dem (three de_inferno smokes, 52/68/76 bricks):
-//
-//	fixed budget  700: 0.909 0.824 0.737  mean 0.823
-//	fixed budget  800: 0.862 0.882 0.756  mean 0.834  ← best single budget
-//	fixed budget  900: 0.758 0.884 0.825  mean 0.822
-//	fixed budget 1000: 0.704 0.900 0.821  mean 0.809
-//	fitted per smoke:  0.923 0.900 0.838  mean 0.887  (budgets 646/994/910)
-//
-// The best budgets spread 610–1000, so no single size is right and each smoke
-// is fitted inside 600–1100 (the spread seen here, padded), preferring the
-// size nearest 800 where several match equally. The breadth-first shape beats
-// ordering the flood by brick arrival (0.77–0.83 mean at its best), which is
-// why arrival only sets timing.
-//
-// The step is set from growth: the server sent 47–58% of each cloud's bricks
-// on the detonation frame, 50–71% by 16 ticks and 72–90% by 32. At six ticks
-// a voxel the fitted clouds are 40–50% filled by 16 ticks and 96–100% by 32;
-// at two or four ticks most of the cloud is in by 16, ahead of the server.
-func TestSmokeVoxelCalibration(t *testing.T) {
-	tracks, _ := collectVoxelTracks(t, testDemo(t))
-	if len(tracks) != len(testDemoSmokes) {
-		t.Fatalf("%d smokes, want %d", len(tracks), len(testDemoSmokes))
-	}
-	p := defaultVoxelFlood
-	var fixedSum, fittedSum float64
-	for _, tr := range tracks {
-		l := tr.log
-		fixed := l.brickIoU(l.fillOrder(p.budgetMax, voxelStepCost)[:p.budget])
-		order := l.fillOrder(p.budgetMax, p.fall)
-		budget, fitted := l.fitBudget(order, p)
-		fixedSum += fixed
-		fittedSum += fitted
-
-		sent := 0
-		for _, bt := range l.brickTick {
-			if bt >= 0 {
-				sent++
-			}
-		}
-		arrival := l.timeShape(order[:budget], int(p.stepSecs*64+0.5))
-		var by16, by32, last int
-		for _, a := range arrival {
-			if a < 0 {
-				continue
-			}
-			if a <= 16 {
-				by16++
-			}
-			if a <= 32 {
-				by32++
-			}
-			last = max(last, a)
-		}
-		t.Logf("smoke %d: %d frames, %d bricks; fixed %d → IoU %.3f; fitted %d → IoU %.3f; filled %.0f%% by 16 ticks, %.0f%% by 32, last at %d",
-			tr.startTick, l.frames, sent, p.budget, fixed, budget, fitted,
-			100*float64(by16)/float64(budget), 100*float64(by32)/float64(budget), last)
-
-		if budget <= p.budgetMin || budget >= p.budgetMax {
-			t.Errorf("smoke %d fitted to the edge of the range (%d); widen it", tr.startTick, budget)
-		}
-	}
-	n := float64(len(tracks))
-	t.Logf("mean IoU: fixed %.3f, fitted %.3f", fixedSum/n, fittedSum/n)
-	if fittedSum/n < 0.85 {
-		t.Errorf("fitted clouds match the server's bricks at %.3f, want ≥ 0.85", fittedSum/n)
 	}
 }

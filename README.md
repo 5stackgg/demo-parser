@@ -58,9 +58,13 @@ four pairings, along with `caveats` describing what the model does not know.
 ### `POST /smoke-voxels` — a smoke from its live voxel log
 
 CS2 networks each smoke's simulation on the projectile as an append-only log
-(`m_VoxelFrameData`, `m_nVoxelFrameDataSize` bytes in use). A server plugin
-reads it every tick and sends it here, and it is rebuilt exactly as a demo's
-`smoke_voxels` row is:
+(`m_VoxelFrameData`, `m_nVoxelFrameDataSize` bytes in use): the voxels the
+smoke comes out of, and the world geometry around them, a frame for every step
+the server's simulation takes. The cloud itself is never sent; server and
+client each run the same simulation. This runs it too — the game's own, step
+for step (`internal/parser/smoke_sim.go`) — so the cloud is the one the game
+had. A server plugin reads the log every tick and sends it here, and it is
+replayed exactly as a demo's `smoke_voxels` row is:
 
 ```jsonc
 POST /smoke-voxels
@@ -73,10 +77,13 @@ POST /smoke-voxels
 ```
 
 Each frame is stamped with the first sample that completed it, so the samples
-are what times the cloud's growth; the log alone gives only its shape. The
-answer is one `smoke_voxels` row (`ox/oy/oz`, `vs`, `dx/dy/dz`, `arr`) with
+are what times the cloud's growth; the log alone gives only its shape. A voxel
+is in the cloud once it holds 5% of a full one, the game's own line for a point
+being in smoke, and only the steps the log holds are replayed (ten seconds at
+most), so a log cut short gives the cloud as it stood then. The answer is one
+`smoke_voxels` row (`ox/oy/oz`, `vs`, `dx/dy/dz`, `arr`) with
 `gid`, `round` and `start_tick` 0 and `end_tick` the last sample's tick. A log
-with no source points, or a zero detonation, is `422`; a body that does not
+with no emitters, or a zero detonation, is `422`; a body that does not
 decode, or samples that run past the log or back in time, is `400`. Errors are
 `{"error": "..."}`.
 

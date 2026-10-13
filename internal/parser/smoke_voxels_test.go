@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"math"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -26,7 +27,8 @@ func voxelFrameBytes(n int, sources []voxelSource, bricks []voxelBrick) []byte {
 	if len(sources) > 0 {
 		p = append(p, byte(len(sources)))
 		for _, s := range sources {
-			p = append(p, s.X, s.Y, s.Z, s.V, 0, 0, 0, 0)
+			p = append(p, s.X, s.Y, s.Z, s.V)
+			p = binary.LittleEndian.AppendUint32(p, math.Float32bits(s.Hold))
 		}
 	}
 	if len(bricks) > 0 {
@@ -95,7 +97,7 @@ func TestMaskBitIsMorton(t *testing.T) {
 }
 
 func TestDecodeVoxelFrames(t *testing.T) {
-	src := []voxelSource{{X: 16, Y: 16, Z: 15, V: 5}, {X: 17, Y: 16, Z: 15, V: 0}}
+	src := []voxelSource{{X: 16, Y: 16, Z: 15, V: 5}, {X: 17, Y: 16, Z: 15, V: 0, Hold: 0.8}}
 	buf := voxelFrameBytes(0, src, []voxelBrick{{Index: 7, Mask: 1 << 63}})
 	buf = append(buf, voxelFrameBytes(1, nil, nil)...)
 	buf = append(buf, voxelFrameBytes(2, nil, []voxelBrick{{Index: 511, Mask: 0}, {Index: 448, Mask: 3}})...)
@@ -130,15 +132,24 @@ func TestDecodeVoxelFrames(t *testing.T) {
 	for i, f := range frames {
 		l.apply(f, i*7)
 	}
-	if !l.solid[voxelIndex(7, 7, 7)] || l.solid[voxelIndex(4, 4, 4)] {
+	if !l.solid[interleave3(7, 7, 7)] || l.solid[interleave3(4, 4, 4)] {
 		t.Error("brick 7's mask should mark exactly its (3,3,3) voxel")
 	}
 	// Brick 448 is (4,4,4), voxels 16-19 on each axis.
-	if l.brickTick[brickOf(16, 16, 16)] != 14 {
-		t.Errorf("brick 448 arrived at %d, want 14", l.brickTick[brickOf(16, 16, 16)])
+	if !l.sent[448] || !l.sent[7] || !l.sent[511] || l.sent[0] {
+		t.Error("the bricks sent should be 7, 448 and 511")
 	}
-	if !l.solid[voxelIndex(16, 16, 16)] || !l.solid[voxelIndex(17, 16, 16)] || l.solid[voxelIndex(16, 17, 16)] {
+	if !l.solid[interleave3(16, 16, 16)] || !l.solid[interleave3(17, 16, 16)] || l.solid[interleave3(16, 17, 16)] {
 		t.Error("brick 448's mask 0b11 should mark its first two voxels along x")
+	}
+	if len(l.steps) != 3 || l.steps[2].tick != 14 {
+		t.Fatalf("steps %+v, want three, the last read at tick 14", l.steps)
+	}
+	if e := l.steps[0].emitters; len(e) != 2 || e[1] != (simEmitter{x: 17, y: 16, z: 15, hold: 0.8}) {
+		t.Errorf("the first step's emitters are %+v", e)
+	}
+	if l.steps[1].emitters != nil || l.steps[2].emitters != nil {
+		t.Error("a frame without emitters should leave them as they were")
 	}
 }
 
@@ -171,7 +182,7 @@ func TestDecodeRecordedVoxelLogs(t *testing.T) {
 		firstBrick    voxelBrick
 		firstBrickSet int
 	}{
-		{"smoke_voxels_inferno_4019.bin", 52, 30, 52, voxelSource{14, 18, 16, 5}, voxelBrick{Index: 448}, 0},
+		{"smoke_voxels_inferno_4019.bin", 52, 30, 52, voxelSource{X: 14, Y: 18, Z: 16, V: 5}, voxelBrick{Index: 448}, 0},
 		{"smoke_voxels_inferno_12642.bin", 40, 37, 68, voxelSource{}, voxelBrick{Index: 116}, 32},
 		{"smoke_voxels_inferno_14690.bin", 37, 36, 76, voxelSource{}, voxelBrick{Index: 286}, 28},
 	}
@@ -249,197 +260,88 @@ func TestDecodeVoxelLogIncrementally(t *testing.T) {
 	}
 }
 
-// openLog is a log where every brick arrived on the detonation frame and the
-// world is empty, so only the sources and the budget shape the cloud.
-func openLog(sources ...voxelSource) *voxelLog {
+// Frames read together are stamped with one tick. The game never takes two
+// steps closer than a tenth of a second, seven ticks at 64, so the steps
+// behind a late read are placed a pace apart ahead of it.
+func TestStepTicksUndoLateReads(t *testing.T) {
+	for _, c := range []struct{ read, want []int }{
+		{[]int{0, 7, 14, 21}, []int{0, 7, 14, 21}},
+		{[]int{0, 7, 14, 28, 28, 35}, []int{0, 7, 14, 21, 28, 35}},
+		{[]int{49, 56, 68, 70, 77}, []int{49, 56, 63, 70, 77}},
+		{[]int{0, 16, 30}, []int{0, 16, 30}},
+		{[]int{0, 0, 0}, []int{0, 0, 0}},
+	} {
+		l := newVoxelLog()
+		for _, tick := range c.read {
+			l.apply(voxelFrame{}, tick)
+		}
+		got := l.stepTicks(64)
+		for i := range c.want {
+			if len(got) != len(c.want) || got[i] != c.want[i] {
+				t.Errorf("frames read at %v: steps at %v, want %v", c.read, got, c.want)
+				break
+			}
+		}
+	}
+	long := newVoxelLog()
+	for n := 0; n < smokeSettleSteps+20; n++ {
+		long.apply(voxelFrame{}, n*7)
+	}
+	if n := len(long.stepTicks(64)); n != smokeSettleSteps {
+		t.Errorf("%d steps replayed from a longer log, want %d", n, smokeSettleSteps)
+	}
+}
+
+// Nothing says what is inside a brick the server never sent, so the cloud
+// stays out of it.
+func TestTheCloudStaysInsideTheBricksSent(t *testing.T) {
 	l := newVoxelLog()
-	for i := range l.brickTick {
-		l.brickTick[i] = 0
+	// Brick 448 is voxels 16-19 on each axis.
+	l.apply(voxelFrame{Sources: []voxelSource{{X: 17, Y: 17, Z: 17, V: 5}}, Bricks: []voxelBrick{{Index: 448}}}, 0)
+	for n := 1; n < 30; n++ {
+		l.apply(voxelFrame{Number: n}, n*7)
 	}
-	l.sources = sources
-	return l
-}
-
-func filledCells(arrival []int) int {
-	n := 0
-	for _, t := range arrival {
-		if t >= 0 {
-			n++
-		}
-	}
-	return n
-}
-
-func TestFloodStopsAtAWall(t *testing.T) {
-	l := openLog(voxelSource{X: 12, Y: 16, Z: 16, V: 5})
-	for z := 0; z < voxelGridDim; z++ {
-		for y := 0; y < voxelGridDim; y++ {
-			l.solid[voxelIndex(16, y, z)] = true
-		}
-	}
-	arrival := l.flood(defaultVoxelFlood, 64)
-	if n := filledCells(arrival); n < defaultVoxelFlood.budgetMin {
-		t.Fatalf("cloud holds %d voxels, want at least %d", n, defaultVoxelFlood.budgetMin)
-	}
-	for i, a := range arrival {
-		if a < 0 {
+	filled := 0
+	for i, tick := range l.cloud(r3.Vector{X: 1}, 64) {
+		if tick < 0 {
 			continue
 		}
-		if x, _, _ := voxelCoord(i); x >= 16 {
-			t.Fatalf("voxel at x=%d filled through the wall", x)
+		filled++
+		if x, y, z := voxelCoord(i); x < 16 || x > 19 || y < 16 || y > 19 || z < 16 || z > 19 {
+			t.Fatalf("voxel (%d,%d,%d) filled, outside the one brick sent", x, y, z)
 		}
+	}
+	if filled < 20 {
+		t.Fatalf("%d voxels filled inside the brick", filled)
 	}
 }
 
-func TestFloodNeverEntersAnUnsentBrick(t *testing.T) {
-	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
-	unsent := brickOf(20, 16, 16)
-	l.brickTick[unsent] = -1
-	for i, a := range l.flood(defaultVoxelFlood, 64) {
-		if a >= 0 && brickOf(voxelCoord(i)) == unsent {
-			t.Fatal("the cloud filled a brick the server never sent")
+// The smoke stops emitting near its end; the cloud is as it stood before.
+func TestTheCloudIsAsItStoodBeforeFading(t *testing.T) {
+	grown := func(fadeAt int) int {
+		l := newVoxelLog()
+		all := make([]voxelBrick, voxelBricks)
+		for i := range all {
+			all[i].Index = uint16(i)
 		}
-	}
-}
-
-func TestFloodTiming(t *testing.T) {
-	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
-	late := brickOf(24, 16, 16)
-	l.brickTick[late] = 200
-	p := defaultVoxelFlood
-	arrival := l.flood(p, 64)
-	step := int(p.stepSecs*64 + 0.5)
-
-	if got := arrival[voxelIndex(16, 16, 16)]; got != 0 {
-		t.Errorf("the source filled at %d, want 0", got)
-	}
-	if got := arrival[voxelIndex(17, 16, 16)]; got != step {
-		t.Errorf("its neighbour filled at %d, want one step (%d)", got, step)
-	}
-	if got := arrival[voxelIndex(19, 16, 16)]; got != 3*step {
-		t.Errorf("three voxels out filled at %d, want %d", got, 3*step)
-	}
-	for i, a := range arrival {
-		if a >= 0 && brickOf(voxelCoord(i)) == late && a < 200 {
-			t.Fatalf("a voxel filled at %d, before its brick arrived at 200", a)
+		l.apply(voxelFrame{Sources: []voxelSource{{X: 16, Y: 16, Z: 16, V: 5}, {X: 18, Y: 16, Z: 16, V: 5}}, Bricks: all}, 0)
+		for n := 1; n < 40; n++ {
+			l.apply(voxelFrame{Number: n, Fading: fadeAt > 0 && n >= fadeAt}, n*7)
 		}
-	}
-}
-
-// The budget fit should settle on the cloud whose shell matches the bricks
-// the server sent — here, exactly the bricks a known-size cloud touches.
-func TestFitBudgetRecoversTheCloudSize(t *testing.T) {
-	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
-	order := l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
-	const size = 900
-	var sent [voxelBricks]bool
-	for _, c := range order[:size] {
-		x, y, z := voxelCoord(c)
-		for _, d := range [7][3]int{{}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}} {
-			sent[brickOf(x+d[0], y+d[1], z+d[2])] = true
-		}
-	}
-	for b := range l.brickTick {
-		if !sent[b] {
-			l.brickTick[b] = -1
-		}
-	}
-	order = l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
-	budget, iou := l.fitBudget(order, defaultVoxelFlood)
-	if iou != 1 {
-		t.Fatalf("best fit scores %.3f, want a perfect match", iou)
-	}
-	if got := l.brickIoU(order[:budget]); got != 1 {
-		t.Fatalf("the fitted cloud scores %.3f on its own", got)
-	}
-}
-
-// ledgeLog is a smoke that went off on a ledge: floor at z=15 for x < 16, a
-// drop to a floor at z=3 beyond it, sources across the lip. sent says which
-// bricks the server sent.
-func ledgeLog(sent func(b int) bool) *voxelLog {
-	var sources []voxelSource
-	for x := 12; x <= 19; x++ {
-		for y := 13; y <= 19; y++ {
-			sources = append(sources, voxelSource{X: uint8(x), Y: uint8(y), Z: 16, V: 5})
-		}
-	}
-	l := openLog(sources...)
-	for y := 0; y < voxelGridDim; y++ {
-		for x := 0; x < voxelGridDim; x++ {
-			l.solid[voxelIndex(x, y, 3)] = true
-			if x < 16 {
-				for z := 4; z <= 15; z++ {
-					l.solid[voxelIndex(x, y, z)] = true
-				}
+		filled := 0
+		for _, tick := range l.cloud(r3.Vector{X: 1}, 64) {
+			if tick >= 0 {
+				filled++
 			}
 		}
+		return filled
 	}
-	for b := range l.brickTick {
-		if !sent(b) {
-			l.brickTick[b] = -1
-		}
+	whole, cut := grown(0), grown(40-1)
+	if cut == 0 || cut != grown(39) || whole == 0 {
+		t.Fatalf("clouds of %d and %d voxels", whole, cut)
 	}
-	return l
-}
-
-// A smoke that goes off on a ledge pours over it to the floor below, as the
-// game's does, rather than hanging beside it in a ball.
-func TestFloodPoursOffALedge(t *testing.T) {
-	l := ledgeLog(func(int) bool { return true })
-	floor := func(cells []int) int {
-		n := 0
-		for _, c := range cells {
-			if _, _, z := voxelCoord(c); z == 4 {
-				n++
-			}
-		}
-		return n
-	}
-	p := defaultVoxelFlood
-	poured := l.fillOrder(p.budget, p.fall)
-	even := l.fillOrder(p.budget, voxelStepCost)
-	if floor(even) != 0 {
-		t.Fatalf("the even flood already reaches the floor below (%d voxels); the ledge is too low to tell", floor(even))
-	}
-	if floor(poured) == 0 {
-		t.Fatal("the cloud never reaches the floor below the ledge")
-	}
-
-	arrival := l.flood(p, 64)
-	reached := false
-	for i, a := range arrival {
-		if _, _, z := voxelCoord(i); a >= 0 && z == 4 {
-			reached = true
-		}
-	}
-	if !reached {
-		t.Error("the reconstructed cloud never reaches the floor below the ledge")
-	}
-}
-
-// On flat ground there is nowhere to fall, so the pouring flood is the even
-// one: a cloud that does not hang over anything keeps its shape.
-func TestFallChangesNothingOnFlatGround(t *testing.T) {
-	l := openLog(voxelSource{X: 16, Y: 16, Z: 16, V: 5})
-	for y := 0; y < voxelGridDim; y++ {
-		for x := 0; x < voxelGridDim; x++ {
-			for z := 0; z <= 15; z++ {
-				l.solid[voxelIndex(x, y, z)] = true
-			}
-		}
-	}
-	even := l.fillOrder(defaultVoxelFlood.budgetMax, voxelStepCost)
-	for _, fall := range []int{defaultVoxelFlood.fall} {
-		got := l.fillOrder(defaultVoxelFlood.budgetMax, fall)
-		if len(got) != len(even) {
-			t.Fatalf("fall %d fills %d voxels, the even flood %d", fall, len(got), len(even))
-		}
-		for i := range got {
-			if got[i] != even[i] {
-				t.Fatalf("fall %d reaches voxel %d out of order", fall, i)
-			}
-		}
+	if early := grown(3); early >= whole {
+		t.Fatalf("fading from the third step left %d voxels, the whole log %d", early, whole)
 	}
 }
 
@@ -568,6 +470,6 @@ func TestExportVoxelsEmpty(t *testing.T) {
 		arrival[i] = -1
 	}
 	if _, ok := exportVoxels(arrival, r3.Vector{X: 1}, 64); ok {
-		t.Fatal("an empty flood should not export")
+		t.Fatal("an empty cloud should not export")
 	}
 }
