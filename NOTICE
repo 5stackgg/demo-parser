@@ -40,11 +40,14 @@ the copyright holder: https://github.com/lukepolo
 
 THIRD-PARTY SOFTWARE
 
-The demo parser compiles in third-party Go modules, each under its own
-license, among them demoinfocs-golang by Markus Walther (MIT License).
-Their license texts are collected in THIRD_PARTY_NOTICES.txt. After
-changing dependencies, regenerate it with
+The demo parser compiles in the Go standard library and third-party Go
+modules, each under its own license, among them demoinfocs-golang by
+Markus Walther (MIT License). Their license texts are collected in
+THIRD_PARTY_NOTICES.txt. After changing dependencies, regenerate it with
 `scripts/third-party-notices.sh`.
 
 The demos in the testdata directories are recordings of Counter-Strike 2,
 a game by Valve Corporation.
+
+The image carries LICENSE, NOTICE and THIRD_PARTY_NOTICES.txt in
+/usr/share/doc/demo-parser.
