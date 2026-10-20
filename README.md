@@ -193,3 +193,7 @@ Mesh loading is process-wide, concurrency-safe and LRU-bounded; raise
 `MAP_MESH_CACHE` (default 2) on a deployment serving lineups across many maps.
 Drift needs at least 2 or it refetches a mesh per request, and 4 is a better
 number on a pod that also serves the other endpoints.
+
+## License
+
+Licensed under the [GNU AGPL v3](LICENSE), with the additional terms in [NOTICE](NOTICE): keep the "Powered by 5Stack" credit, and do not present a modified version as the official 5Stack. For other licensing, contact [@lukepolo](https://github.com/lukepolo). Contributors sign the [CLA](CLA.md) on their first pull request.

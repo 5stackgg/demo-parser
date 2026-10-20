@@ -59,6 +59,7 @@ FROM gcr.io/distroless/static-debian12
 # from this exact path. Don't change it without coordinating both
 # build pipelines.
 COPY --from=build /out/demo-parser /usr/local/bin/demo-parser
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.txt /usr/share/doc/demo-parser/
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/demo-parser"]
