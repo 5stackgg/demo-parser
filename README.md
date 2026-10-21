@@ -196,4 +196,4 @@ number on a pod that also serves the other endpoints.
 
 ## License
 
-Licensed under the [GNU AGPL v3](LICENSE), with the additional terms in [NOTICE](NOTICE): keep the "Powered by 5Stack" credit, and do not present a modified version as the official 5Stack. For other licensing, contact [@lukepolo](https://github.com/lukepolo). Contributors sign the [CLA](CLA.md) on their first pull request.
+Licensed under the [GNU AGPL v3](LICENSE), with the additional terms in [NOTICE](NOTICE): keep the "Powered by 5Stack" credit, and do not present a modified version as the official 5Stack. For other licensing, contact [@lukepolo](https://github.com/lukepolo). By contributing you agree to the terms in [CONTRIBUTING.md](CONTRIBUTING.md).
