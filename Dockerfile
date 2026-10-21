@@ -31,7 +31,13 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Stage 1: build the Go binary -----------------------------------------
-FROM golang:1.24-alpine AS build
+FROM golang:1.27.3-alpine AS build
+
+# Alpine drops the compromised eMudhra roots (AAA Certificate Services,
+# emSign ECC Root CA - G3) from 20261020-r0 on. Both packages move
+# together: ca-certificates' trigger rebuilds the bundle from its own
+# files. The runtime stage copies this bundle over distroless's.
+RUN apk upgrade --no-cache ca-certificates ca-certificates-bundle
 
 WORKDIR /src
 COPY go.mod go.sum* ./
@@ -60,6 +66,11 @@ FROM gcr.io/distroless/static-debian12
 # build pipelines.
 COPY --from=build /out/demo-parser /usr/local/bin/demo-parser
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.txt /usr/share/doc/demo-parser/
+
+# Go reads the system bundle for outbound TLS. distroless static-debian12
+# still trusts the compromised eMudhra roots, so ship the build stage's
+# bundle instead.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/demo-parser"]
